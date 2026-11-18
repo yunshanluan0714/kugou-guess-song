@@ -1,0 +1,182 @@
+<view class="container room-page">
+  <view wx:if="{{!room}}" class="card">
+    <view class="card-title">正在进入房间…</view>
+    <view class="muted">请稍候，正在同步酷狗华语曲库与房间状态</view>
+  </view>
+
+  <!-- ==================== WAITING / COUNTDOWN LOBBY ==================== -->
+  <block wx:elif="{{room.status === 'waiting' || room.status === 'countdown'}}">
+    <view class="card">
+      <view class="room-code-pill">房间号 {{room.code}}</view>
+      <view class="room-title">{{room.name}}</view>
+      <view class="muted">酷狗华语曲库 · 共 {{room.totalRounds}} 轮 · 每轮 {{room.roundDurationSec}} 秒</view>
+
+      <view class="ready-banner {{room.status === 'countdown' ? 'countdown' : ''}}">
+        <text wx:if="{{room.status === 'countdown'}}">所有人准备就绪！{{countdownLeft}} 秒后开始游戏</text>
+        <text wx:else>已准备 {{readyCount}}/{{room.players.length}} 人（全员准备后自动开局）</text>
+      </view>
+
+      <view class="vip-row {{room.vipStatus && room.vipStatus.unlocked ? 'unlocked' : ''}}">
+        <text wx:if="{{room.vipStatus && room.vipStatus.unlocked}}">✓ 已开启会员实时拉取：{{room.vipStatus.kugouNickname}}</text>
+        <text wx:else>曲库：免费华语池（可登录会员解锁 VIP 原版）</text>
+        <view class="row-gap">
+          <button class="btn-ghost" size="mini" bindtap="onToggleVipPanel">
+            {{showVipPanel ? '收起' : (room.vipStatus && room.vipStatus.unlocked ? '切换' : '会员登录')}}
+          </button>
+          <button wx:if="{{room.vipStatus && room.vipStatus.unlocked && !room.vipStatus.isEnvDefault}}" class="btn-ghost" size="mini" bindtap="onUnbindVip">解绑</button>
+        </view>
+      </view>
+
+      <view wx:if="{{showVipPanel}}" class="vip-panel">
+        <image wx:if="{{qrImgBase64}}" class="qr-img" src="{{qrImgBase64}}" mode="aspectFit" />
+        <view class="muted" style="margin: 12rpx 0;">{{qrStatusText}}</view>
+        <button class="btn-ghost" size="mini" bindtap="onRefreshQr">刷新二维码</button>
+        <view class="vip-cookie-row">
+          <input class="input-box" placeholder="或粘贴 Cookie (含 userid 和 token)" value="{{vipCookie}}" bindinput="onVipCookieInput" />
+          <button class="btn-primary" size="mini" bindtap="onSubmitVipCookie">绑定</button>
+        </view>
+      </view>
+    </view>
+
+    <view class="card">
+      <view class="row-between">
+        <view class="card-title" style="margin-bottom:0;">歌友席位 ({{room.players.length}}/8)</view>
+        <view class="row-gap">
+          <button class="btn-ghost" size="mini" bindtap="onAddBot">+ AI 歌友</button>
+          <button wx:if="{{hasBot}}" class="btn-ghost" size="mini" bindtap="onRemoveBot">移除 AI</button>
+        </view>
+      </view>
+
+      <view class="player-list">
+        <view wx:for="{{room.players}}" wx:key="clientId" class="player-card {{item.ready ? 'ready' : ''}}">
+          <view class="avatar" style="background: {{item.avatarColor}};">{{item.nickname[0]}}</view>
+          <view class="player-info">
+            <view class="player-name">{{item.nickname}} {{item.clientId === clientId ? '(我)' : ''}}</view>
+            <view class="player-status">{{item.ready ? '✓ 已准备' : '准备中…'}}</view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <view class="lobby-actions">
+      <button class="{{selfReady ? 'btn-ghost' : 'btn-primary'}} flex-1" bindtap="onToggleReady">
+        {{selfReady ? '取消准备' : '准备就绪'}}
+      </button>
+      <button wx:if="{{room.players.length === 1 && selfReady}}" class="btn-accent flex-1" bindtap="onSoloStart">
+        单人试玩开始
+      </button>
+    </view>
+  </block>
+
+  <!-- ==================== ACTIVE 10-ROUND GAME ==================== -->
+  <block wx:elif="{{room.status === 'loading_round' || room.status === 'playing' || room.status === 'round_reveal'}}">
+    <view class="card">
+      <view class="row-between">
+        <view class="round-tag">第 {{room.currentRound}} / {{room.totalRounds}} 轮</view>
+        <view class="timer-tag">{{room.status === 'playing' ? roundSecondsLeft + 's' : '揭晓中'}}</view>
+        <button class="btn-ghost" size="mini" bindtap="onVoteSkip" disabled="{{room.status !== 'playing'}}">
+          跳过 ({{room.skipVotes}}/{{room.skipNeeded}})
+        </button>
+      </view>
+
+      <view class="stage-center">
+        <view class="disc {{room.status === 'playing' ? 'spinning' : ''}}">♪</view>
+        <view class="stage-headline">
+          {{room.status === 'loading_round' ? '正在抽取酷狗华语歌曲…' : (room.status === 'playing' ? '正在播放前 50% 随机片段' : '本轮答案已揭晓')}}
+        </view>
+        <view wx:if="{{room.activeRound}}" class="hint-line">
+          <text wx:if="{{room.status === 'playing'}}">歌名提示：{{room.activeRound.titleLengthHint}} 个字 · </text>
+          <text>起点 {{startOffsetLabel}}（全曲 {{room.activeRound.startPercent}}%）</text>
+        </view>
+      </view>
+
+      <!-- First 50% Timeline -->
+      <view wx:if="{{room.activeRound}}" class="timeline">
+        <view class="timeline-track">
+          <view class="timeline-half"></view>
+          <view class="timeline-pin" style="left: {{room.activeRound.startPercent}}%;"></view>
+        </view>
+        <view class="row-between muted" style="margin-top:8rpx;font-size:22rpx;">
+          <text>00:00</text>
+          <text>前 50% 随机切入区</text>
+          <text>{{durationLabel}}</text>
+        </view>
+      </view>
+
+      <!-- Reveal Box -->
+      <view wx:if="{{room.status === 'round_reveal' && room.activeRound.revealedSong}}" class="reveal-box">
+        <view class="reveal-winner">
+          {{room.activeRound.revealedSong.winnerNickname ? '🎯 ' + room.activeRound.revealedSong.winnerNickname + ' 猜中 +1 分！' : '⏱️ 本轮无人猜中'}}
+        </view>
+        <view class="reveal-title">《{{room.activeRound.revealedSong.canonicalTitle}}》</view>
+        <view class="muted">演唱：{{room.activeRound.revealedSong.singerName}}</view>
+      </view>
+    </view>
+
+    <!-- Live Scoreboard -->
+    <view class="card">
+      <view class="card-title">实时积分榜</view>
+      <view wx:for="{{room.rankings}}" wx:key="clientId" class="score-row">
+        <text class="rank-col">#{{item.rank}}</text>
+        <text class="name-col">{{item.nickname}}{{item.clientId === clientId ? ' (我)' : ''}}</text>
+        <text class="pts-col">{{item.score}} 分</text>
+      </view>
+    </view>
+
+    <!-- Guess Feed -->
+    <view class="card">
+      <view class="card-title">抢答动态</view>
+      <scroll-view scroll-y class="feed-scroll">
+        <view wx:for="{{room.feed}}" wx:key="id" class="feed-row {{item.type === 'correct_guess' ? 'win' : ''}}">
+          <text wx:if="{{item.type === 'wrong_guess'}}">{{item.nickname}} 猜：{{item.text}}</text>
+          <text wx:else>{{item.text}}</text>
+        </view>
+      </scroll-view>
+    </view>
+
+    <!-- Bottom Fixed Guess Input -->
+    <view class="bottom-guess-bar">
+      <input
+        class="guess-input"
+        value="{{guessText}}"
+        maxlength="40"
+        placeholder="输入华语歌名抢答…"
+        confirm-type="send"
+        bindinput="onGuessInput"
+        bindconfirm="onSubmitGuess"
+      />
+      <button class="btn-primary guess-btn" bindtap="onSubmitGuess">猜歌</button>
+    </view>
+  </block>
+
+  <!-- ==================== FINAL 10-ROUND RANKING ==================== -->
+  <block wx:elif="{{room.status === 'finished'}}">
+    <view class="card">
+      <view class="card-title" style="text-align:center;">🏆 十轮比赛最终得分排名</view>
+      <view wx:for="{{room.rankings}}" wx:key="clientId" class="final-rank-item {{item.rank === 1 ? 'top1' : ''}}">
+        <view class="rank-badge">第 {{item.rank}} 名</view>
+        <view class="flex-1">
+          <view class="player-name">{{item.nickname}}{{item.clientId === clientId ? ' (我)' : ''}}</view>
+          <view class="muted">猜对 {{item.correctCount}} 首</view>
+        </view>
+        <view class="final-score">{{item.score}} 分</view>
+      </view>
+
+      <view class="lobby-actions" style="margin-top:24rpx;">
+        <button class="btn-primary flex-1" bindtap="onPlayAgain">再来一局 (10轮)</button>
+        <button class="btn-ghost flex-1" bindtap="onLeaveRoom">返回大厅</button>
+      </view>
+    </view>
+
+    <view class="card">
+      <view class="card-title">十首酷狗华语曲库歌单回顾</view>
+      <view wx:for="{{room.history}}" wx:key="roundNumber" class="history-row">
+        <view class="history-num">{{item.roundNumber}}</view>
+        <view class="flex-1">
+          <view class="player-name">《{{item.canonicalTitle}}》 - {{item.singerName}}</view>
+          <view class="muted">起点 {{item.startPercent}}% · {{item.winnerNickname ? item.winnerNickname + ' 猜中 (+1分)' : '未猜出'}}</view>
+        </view>
+      </view>
+    </view>
+  </block>
+</view>

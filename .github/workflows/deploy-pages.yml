@@ -1,0 +1,44 @@
+name: Deploy Frontend to GitHub Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'public/**'
+      - '.github/workflows/deploy-pages.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # 仅当仓库 Variables 中配置了 CLOUD_API_ORIGIN（例如 https://xxx.zeabur.app）或手动触发时部署 GitHub Pages
+    if: github.event_name == 'workflow_dispatch' || vars.CLOUD_API_ORIGIN != ''
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inject Cloud API Origin if configured
+        env:
+          CLOUD_API_ORIGIN: ${{ vars.CLOUD_API_ORIGIN }}
+        run: |
+          mkdir -p dist
+          cp -r public/* dist/
+          if [ -n "$CLOUD_API_ORIGIN" ]; then
+            sed -i "s|<script type=\"module\" src=\"./app.js\"></script>|<script>window.GUESS_SONG_API_ORIGIN = '${CLOUD_API_ORIGIN}';</script><script type=\"module\" src=\"./app.js\"></script>|" dist/index.html
+          fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: './dist'
+      - id: deployment
+        uses: actions/deploy-pages@v4

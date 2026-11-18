@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>华语猜歌 · 酷狗华语曲库</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Minimal Header -->
+    <header class="site-header">
+      <div class="brand-text">
+        <h1>华语猜歌</h1>
+        <p class="brand-sub">
+          <span>酷狗华语曲库</span>
+          <span aria-hidden="true">·</span>
+          <span id="pool-badge">曲库连接中</span>
+        </p>
+      </div>
+      <div class="header-actions">
+        <span id="conn-pill" class="conn-pill conn-connecting" role="status">连接中</span>
+        <button
+          type="button"
+          id="open-vip-btn"
+          class="btn btn-outline btn-sm"
+          command="show-modal"
+          commandfor="vip-dialog"
+        >
+          会员登录
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-sm"
+          command="show-modal"
+          commandfor="rules-dialog"
+        >
+          规则
+        </button>
+      </div>
+    </header>
+
+    <!-- Toast Notification -->
+    <div id="toast-banner" class="toast-banner" role="status" aria-live="polite" hidden></div>
+
+    <main class="app-main">
+      <!-- ==================== VIEW 1: HOME ==================== -->
+      <section id="view-home" class="view-panel">
+        <div class="card">
+          <h2 id="create-form-title">创建房间</h2>
+          <form id="create-room-form" aria-labelledby="create-form-title" novalidate>
+            <div class="form-group">
+              <label for="nickname-input">昵称 <span aria-hidden="true">*</span></label>
+              <input
+                type="text"
+                id="nickname-input"
+                name="nickname"
+                maxlength="16"
+                required
+                autocomplete="nickname"
+                placeholder="输入你的昵称"
+                enterkeyhint="next"
+                aria-describedby="nickname-error"
+              >
+              <span id="nickname-error" class="field-error" aria-live="polite"></span>
+            </div>
+
+            <div class="form-group">
+              <label for="room-name-input">房间名称（可选）</label>
+              <input
+                type="text"
+                id="room-name-input"
+                name="roomName"
+                maxlength="24"
+                placeholder="留空自动生成"
+                enterkeyhint="done"
+              >
+            </div>
+
+            <fieldset class="radio-fieldset">
+              <legend>曲库范围</legend>
+              <div class="radio-pills">
+                <label class="radio-pill">
+                  <input type="radio" name="category" value="all" checked>
+                  <span>全部华语</span>
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="category" value="classic">
+                  <span>经典怀旧</span>
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="category" value="chart">
+                  <span>流行热歌</span>
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="category" value="folk_rock">
+                  <span>民谣摇滚</span>
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="category" value="cantonese_ost">
+                  <span>粤语影视</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="radio-fieldset">
+              <legend>单轮时长</legend>
+              <div class="radio-pills">
+                <label class="radio-pill">
+                  <input type="radio" name="roundDurationSec" value="30">
+                  <span>30 秒</span>
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="roundDurationSec" value="45" checked>
+                  <span>45 秒</span>
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="roundDurationSec" value="60">
+                  <span>60 秒</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <button type="submit" id="create-room-btn" class="btn btn-primary btn-block">
+              创建房间
+            </button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2 id="join-form-title">加入房间</h2>
+          <form id="join-room-form" aria-labelledby="join-form-title" novalidate>
+            <div class="form-group">
+              <label for="room-code-input">6 位数字房间号 <span aria-hidden="true">*</span></label>
+              <div class="inline-row">
+                <input
+                  type="text"
+                  id="room-code-input"
+                  name="roomCode"
+                  inputmode="numeric"
+                  pattern="\d{6}"
+                  maxlength="6"
+                  required
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  enterkeyhint="go"
+                  placeholder="例如：824190"
+                  aria-describedby="room-code-error"
+                >
+                <button type="submit" id="join-room-btn" class="btn btn-outline">
+                  加入
+                </button>
+              </div>
+              <span id="room-code-error" class="field-error" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <hr class="divider">
+
+          <div class="section-row">
+            <h3>公开房间</h3>
+            <button type="button" id="refresh-rooms-btn" class="btn btn-ghost btn-sm">
+              刷新
+            </button>
+          </div>
+          <div id="public-rooms-list" class="public-rooms-list">
+            <p class="muted-empty">暂无公开房间</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 2: WAITING LOBBY ==================== -->
+      <section id="view-lobby" class="view-panel" hidden>
+        <div class="card">
+          <div class="lobby-header">
+            <div>
+              <span class="room-code-tag">房间号 <strong id="lobby-room-code">------</strong></span>
+              <h2 id="lobby-room-name">华语猜歌房</h2>
+              <p id="lobby-room-desc" class="muted-text">全部华语 · 10 轮 · 45 秒</p>
+            </div>
+            <div class="lobby-actions-top">
+              <button type="button" id="copy-code-btn" class="btn btn-outline btn-sm">
+                复制链接
+              </button>
+              <button type="button" id="leave-lobby-btn" class="btn btn-ghost btn-sm">
+                退出
+              </button>
+            </div>
+          </div>
+
+          <div id="ready-banner" class="ready-banner" role="status">
+            <span id="ready-status-text">所有人准备就绪后自动开始</span>
+            <span id="countdown-pill" class="countdown-pill" hidden>3</span>
+          </div>
+
+          <div id="lobby-vip-bar" class="lobby-vip-bar">
+            <span id="lobby-vip-text" class="lobby-vip-text">曲库：免费华语曲库</span>
+            <div class="lobby-vip-actions">
+              <button
+                type="button"
+                id="lobby-vip-btn"
+                class="btn btn-outline btn-sm"
+                command="show-modal"
+                commandfor="vip-dialog"
+              >
+                登录会员解锁全曲库
+              </button>
+              <button type="button" id="unbind-vip-btn" class="btn btn-ghost btn-sm" hidden>
+                解绑
+              </button>
+            </div>
+          </div>
+
+          <div class="section-row" style="margin-block-start: 1rem;">
+            <h3>玩家 (<span id="lobby-player-count">0</span>/8)</h3>
+            <div class="bot-controls">
+              <button type="button" id="add-bot-btn" class="btn btn-ghost btn-sm">
+                + AI 歌友
+              </button>
+              <button type="button" id="remove-bot-btn" class="btn btn-ghost btn-sm" hidden>
+                移除 AI
+              </button>
+            </div>
+          </div>
+
+          <ul id="lobby-players-list" class="players-list"></ul>
+
+          <div class="lobby-cta-bar">
+            <button type="button" id="ready-toggle-btn" class="btn btn-primary btn-block">
+              准备就绪
+            </button>
+            <button type="button" id="solo-start-btn" class="btn btn-outline btn-block" hidden>
+              单人开始
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 3: ACTIVE 10-ROUND GAME ==================== -->
+      <section id="view-game" class="view-panel game-view" hidden>
+        <div class="game-top-bar">
+          <div class="round-counter">
+            <span class="round-pill">第 <strong id="game-round-num">1</strong> / 10 轮</span>
+            <span id="game-source-tag" class="muted-text">酷狗华语</span>
+          </div>
+          <strong id="round-timer-text" class="timer-value">45s</strong>
+          <div class="game-top-actions">
+            <button type="button" id="mute-btn" class="btn btn-outline btn-sm" aria-pressed="false">
+              声音开启
+            </button>
+            <button type="button" id="skip-vote-btn" class="btn btn-outline btn-sm">
+              跳过 (0/1)
+            </button>
+            <button type="button" id="leave-game-btn" class="btn btn-ghost btn-sm">
+              退出
+            </button>
+          </div>
+        </div>
+
+        <!-- Minimal Player Stage Card -->
+        <div class="card stage-card">
+          <div class="stage-status-row">
+            <div class="stage-status-left">
+              <span id="playing-dot" class="playing-dot" aria-hidden="true"></span>
+              <div>
+                <div id="playing-status-title" class="stage-headline">正在播放片段</div>
+                <p id="song-hint-text" class="song-hint-text">-- 个字</p>
+              </div>
+            </div>
+            <button type="button" id="manual-play-btn" class="btn btn-outline btn-sm" hidden>
+              点击播放
+            </button>
+          </div>
+
+          <!-- First 50% Timeline -->
+          <div class="timeline-box" aria-label="播放节点位于歌曲前 50% 区间">
+            <div class="timeline-labels">
+              <span>00:00</span>
+              <span id="start-node-badge" class="start-node-badge">起点 --:--（前 50%）</span>
+              <span id="duration-total-text">00:00</span>
+            </div>
+            <div class="timeline-track">
+              <div class="timeline-first-half"></div>
+              <div class="timeline-half-divider" title="50% 分界线">
+                <span>50%</span>
+              </div>
+              <div id="timeline-start-pin" class="timeline-start-pin" style="left: 0%"></div>
+              <div id="timeline-playhead" class="timeline-playhead" style="left: 0%"></div>
+            </div>
+          </div>
+
+          <!-- Round Reveal Banner -->
+          <div id="round-reveal-box" class="round-reveal-box" role="status" hidden>
+            <img id="reveal-cover-img" class="reveal-cover-img" alt="" hidden>
+            <div class="reveal-meta">
+              <div class="reveal-badge" id="reveal-badge-text">猜中 +1 分</div>
+              <div class="reveal-song-title" id="reveal-song-title">《--》</div>
+              <div class="reveal-singer" id="reveal-singer-text">--</div>
+              <div class="reveal-next-hint" id="reveal-next-hint">下一轮即将开始</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Compact Live Scoreboard -->
+        <div class="card compact-card">
+          <div class="section-row">
+            <h3>实时积分</h3>
+            <span class="muted-text">猜中 +1 分</span>
+          </div>
+          <p id="scoreboard-status" role="status" class="visually-hidden"></p>
+          <div id="live-scoreboard" class="live-scoreboard"></div>
+        </div>
+
+        <!-- Guess Feed -->
+        <div class="card compact-card">
+          <div class="section-row">
+            <h3>抢答记录</h3>
+            <span class="muted-text">可省略标点与书名号</span>
+          </div>
+          <ul id="guess-feed" class="guess-feed" aria-live="polite"></ul>
+        </div>
+
+        <!-- Bottom Fixed Guess Input Bar -->
+        <div class="bottom-guess-bar">
+          <form id="guess-form" class="guess-form" novalidate>
+            <label for="guess-input" class="visually-hidden">输入华语歌名</label>
+            <input
+              type="text"
+              id="guess-input"
+              name="guess"
+              maxlength="40"
+              autocomplete="off"
+              enterkeyhint="send"
+              placeholder="输入歌名（回车提交）…"
+            >
+            <button type="submit" id="guess-submit-btn" class="btn btn-primary">
+              猜歌
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 4: FINAL 10-ROUND RANKING ==================== -->
+      <section id="view-result" class="view-panel" hidden>
+        <div class="card">
+          <p class="muted-text" style="margin-block-end: 0.25rem;">十轮结束</p>
+          <h2 id="result-champion-title">最终排名</h2>
+          <div id="podium-grid" class="podium-grid"></div>
+
+          <div tabindex="0" role="region" aria-labelledby="ranking-caption" class="table-wrapper">
+            <table class="ranking-table">
+              <caption id="ranking-caption" class="visually-hidden">十轮猜歌最终积分排名表</caption>
+              <thead>
+                <tr>
+                  <th>名次</th>
+                  <th>玩家</th>
+                  <th>总得分</th>
+                  <th>猜对曲数</th>
+                  <th>累计用时</th>
+                </tr>
+              </thead>
+              <tbody id="final-ranking-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="result-actions">
+            <button type="button" id="play-again-btn" class="btn btn-primary">
+              再来一局
+            </button>
+            <button type="button" id="result-leave-btn" class="btn btn-outline">
+              返回大厅
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>本局十首曲目</h3>
+          <ol id="round-history-list" class="history-list"></ol>
+        </div>
+      </section>
+    </main>
+
+    <audio id="game-audio" preload="auto"></audio>
+  </div>
+
+  <!-- Native Modal Dialog: Rules -->
+  <dialog id="rules-dialog" aria-labelledby="rules-title" closedby="any">
+    <div class="dialog-inner">
+      <div class="dialog-header">
+        <h2 id="rules-title">游戏规则</h2>
+        <button
+          type="button"
+          class="icon-close-btn"
+          command="close"
+          commandfor="rules-dialog"
+          aria-label="关闭弹窗"
+        >
+          <span aria-hidden="true">×</span>
+        </button>
+      </div>
+      <div class="dialog-body">
+        <ul class="rules-list">
+          <li><strong>纯华语曲库</strong>：接入酷狗音乐华语榜单、经典歌单与歌手曲库，自动过滤外语及纯音乐伴奏。</li>
+          <li><strong>会员实时拉取</strong>：任意玩家扫码登录酷狗会员后，全房间共享解锁周杰伦、林俊杰、陈奕迅等 VIP 原版录音室歌曲。</li>
+          <li><strong>全员就绪开局</strong>：房间内所有人准备就绪后，自动倒计时开局。</li>
+          <li><strong>前 50% 随机起点</strong>：每轮随机抽取一首歌曲，从总时长前 50% 内随机节点开始播放。</li>
+          <li><strong>歌名一致即得分</strong>：在底部输入歌名，与标准歌名一致即结束本轮并加 1 分。</li>
+          <li><strong>十轮排名</strong>：每局 10 轮，结束后按总得分排名。</li>
+        </ul>
+      </div>
+      <form method="dialog" class="dialog-footer">
+        <button type="submit" value="ok" class="btn btn-primary" autofocus>知道了</button>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- Native Modal Dialog: KuGou VIP Login -->
+  <dialog id="vip-dialog" aria-labelledby="vip-dialog-title" closedby="any">
+    <div class="dialog-inner">
+      <div class="dialog-header">
+        <h2 id="vip-dialog-title">登录酷狗会员解锁曲库</h2>
+        <button
+          type="button"
+          class="icon-close-btn"
+          command="close"
+          commandfor="vip-dialog"
+          aria-label="关闭会员登录弹窗"
+        >
+          <span aria-hidden="true">×</span>
+        </button>
+      </div>
+
+      <div class="dialog-body">
+        <div id="vip-active-box" class="vip-active-box" hidden>
+          <div>
+            <strong id="vip-active-name">已登录酷狗账号</strong>
+            <p class="muted-text">进入或创建房间时自动为全房间开启 VIP 实时拉取</p>
+          </div>
+          <button type="button" id="logout-vip-btn" class="btn btn-outline btn-sm">
+            退出账号
+          </button>
+        </div>
+
+        <div class="qr-login-box">
+          <div class="qr-frame">
+            <img id="qr-code-img" class="qr-code-img" alt="酷狗音乐扫码登录二维码" hidden>
+            <span id="qr-placeholder" class="muted-text">正在获取二维码…</span>
+          </div>
+          <p id="qr-status-text" class="qr-status-text" role="status">请使用手机酷狗音乐 APP 扫一扫登录</p>
+          <button type="button" id="refresh-qr-btn" class="btn btn-outline btn-sm">
+            刷新二维码
+          </button>
+        </div>
+
+        <details class="manual-auth-details">
+          <summary>使用 Cookie 或 Token 手动绑定</summary>
+          <form id="manual-vip-form" class="manual-vip-form" novalidate>
+            <div class="form-group">
+              <label for="vip-cookie-input">粘贴酷狗网页 Cookie（自动提取 userid 与 token）</label>
+              <input
+                type="text"
+                id="vip-cookie-input"
+                name="cookie"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck="false"
+                placeholder="例如：userid=123456; token=abcdef..."
+              >
+            </div>
+            <div class="manual-split-row">
+              <div class="form-group">
+                <label for="vip-userid-input">或填写 userid</label>
+                <input
+                  type="text"
+                  id="vip-userid-input"
+                  name="userid"
+                  inputmode="numeric"
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  placeholder="数字 ID"
+                >
+              </div>
+              <div class="form-group">
+                <label for="vip-token-input">token</label>
+                <input
+                  type="text"
+                  id="vip-token-input"
+                  name="token"
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  placeholder="登录令牌"
+                >
+              </div>
+            </div>
+            <span id="vip-form-error" class="field-error" aria-live="polite"></span>
+            <button type="submit" class="btn btn-primary btn-block">验证并绑定</button>
+          </form>
+        </details>
+
+        <p class="vip-privacy-note">
+          凭证仅暂存于服务端内存用于当前房间实时获取酷狗音频流，房间关闭或解绑即刻销毁，不写入硬盘，亦不会下发给同房其他玩家。
+        </p>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
