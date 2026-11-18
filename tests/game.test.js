@@ -10,6 +10,9 @@ import {
 } from '../src/songUtils.js';
 import { kugouService } from '../src/kugouService.js';
 import { KuGouAuthManager, parseCookieCredentials } from '../src/kugouAuth.js';
+import { MultiPlatformAuthManager } from '../src/musicHub.js';
+import { neteaseProvider, parseNeteaseCookie } from '../src/neteaseProvider.js';
+import { hash33, parseQQMusicCookie, qqMusicProvider } from '../src/qqMusicProvider.js';
 import { createAppServer } from '../server.js';
 
 // ==================== 1. UNIT TESTS: songUtils ====================
@@ -532,3 +535,219 @@ test('KuGou member login (QR + Cookie) and room VIP real-time session binding wi
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+// ==================== 5. ANTI-SPOILER & MULTI-PLATFORM (NETEASE + QQ) TEST ====================
+test('Zero singer-name spoiler during gameplay and simultaneous NetEase + QQ Music VIP binding', async () => {
+  // Cookie & hash33 unit assertions
+  const neParsed = parseNeteaseCookie('os=pc; MUSIC_U=00aa11bb22cc33dd44ee55ff66778899; __csrf=1');
+  assert.equal(neParsed.musicU, '00aa11bb22cc33dd44ee55ff66778899');
+
+  const qqParsed = parseQQMusicCookie('uin=o03622399; qm_keyst=Q_H_L_secret_qq_key_123456; pgv=1');
+  assert.equal(qqParsed.userid, '3622399');
+  assert.equal(qqParsed.musickey, 'Q_H_L_secret_qq_key_123456');
+  assert.ok(hash33('test_qrsig', 0) > 0);
+  assert.ok(hash33('test_pskey', 5381) > 0);
+
+  let capturedAuthSessions = null;
+  let capturedCustomKeyword = '';
+  const mockMusicService = {
+    async ensurePoolLoaded() {
+      return [];
+    },
+    getPoolStats() {
+      return {
+        totalTracks: 500,
+        uniqueSongs: 500,
+        vipTracks: 200,
+        totalWithVipUniqueSongs: 700,
+        classicCount: 250,
+        chartCount: 250,
+        categories: { classic: 250, chart: 250, folk_rock: 0, cantonese_ost: 0 }
+      };
+    },
+    async pickPlayableRoundSong({ authSessions, customKeyword }) {
+      capturedAuthSessions = authSessions;
+      capturedCustomKeyword = customKeyword;
+      // Intentionally pass a singer-leaking sourceTag to verify RoomManager strips it
+      return {
+        platform: 'netease',
+        hash: 'ne_569200213',
+        canonicalTitle: '消愁',
+        normalizedCanonical: '消愁',
+        rawSongName: '消愁',
+        singerName: '毛不易',
+        duration: 261,
+        startOffset: 62.0,
+        startPercent: 23.8,
+        albumImg: '',
+        sourceTag: '华语精选·毛不易',
+        category: 'folk_rock',
+        streamUrl: 'https://example.com/xiaochou.mp3'
+      };
+    },
+    async proxyAudioStream(_req, res) {
+      res.status(200).send('ok');
+    }
+  };
+
+  const mockNeProvider = {
+    getEnvDefaultSession: () => null,
+    createQrCode: async () => ({
+      platform: 'netease',
+      qrKey: 'ne_unikey_123',
+      qrImgBase64: 'data:image/png;base64,iVBORw0KGgo='
+    }),
+    checkQrCode: async () => ({ state: 'waiting' }),
+    verifyManualCredentials: async ({ cookie }) => {
+      const p = parseNeteaseCookie(cookie);
+      return {
+        platform: 'netease',
+        userid: '777001',
+        token: p.musicU,
+        nickname: '网易云黑胶玩家'
+      };
+    }
+  };
+
+  const mockQqProvider = {
+    getEnvDefaultSession: () => null,
+    createQrCode: async () => ({
+      platform: 'qq',
+      qrKey: 'qq_qrsig_456',
+      qrImgBase64: 'data:image/png;base64,iVBORw0KGgo='
+    }),
+    checkQrCode: async () => ({ state: 'waiting' }),
+    verifyManualCredentials: async ({ cookie }) => {
+      const p = parseQQMusicCookie(cookie);
+      return {
+        platform: 'qq',
+        userid: p.userid,
+        token: p.musickey,
+        nickname: 'QQ绿钻玩家'
+      };
+    }
+  };
+
+  const authMgr = new MultiPlatformAuthManager({
+    netease: mockNeProvider,
+    qq: mockQqProvider
+  });
+
+  const { server } = createAppServer({
+    musicService: mockMusicService,
+    authManager: authMgr,
+    roomOptions: { totalRounds: 10, countdownMs: 30, revealMs: 30 }
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const httpBase = `http://127.0.0.1:${port}`;
+  const wsUrl = `ws://127.0.0.1:${port}/ws`;
+
+  const wsA = await connectClient(wsUrl);
+  const wsB = await connectClient(wsUrl);
+
+  try {
+    // 1. Verify NetEase & QQ QR endpoints
+    const neQr = await (await fetch(`${httpBase}/api/auth/netease/qr/create`, { method: 'POST' })).json();
+    assert.equal(neQr.ok, true);
+    assert.equal(neQr.qrKey, 'ne_unikey_123');
+
+    const qqQr = await (await fetch(`${httpBase}/api/auth/qq/qr/create`, { method: 'POST' })).json();
+    assert.equal(qqQr.ok, true);
+    assert.equal(qqQr.qrKey, 'qq_qrsig_456');
+
+    // 2. Manual login on NetEase and QQ Music
+    const neAuth = await (
+      await fetch(`${httpBase}/api/auth/netease/manual`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie: 'MUSIC_U=secret_netease_music_u_9999999999' })
+      })
+    ).json();
+    assert.equal(neAuth.ok, true);
+    assert.ok(neAuth.authTicket.startsWith('ne_'));
+
+    const qqAuth = await (
+      await fetch(`${httpBase}/api/auth/qq/manual`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie: 'uin=o012345678; qm_keyst=Q_H_L_secret_qq_token_888888' })
+      })
+    ).json();
+    assert.equal(qqAuth.ok, true);
+    assert.ok(qqAuth.authTicket.startsWith('qq_'));
+
+    // 3. Player A creates room with NetEase VIP & customKeyword; Player B joins & binds QQ VIP
+    wsA.send(
+      JSON.stringify({
+        type: 'create_room',
+        clientId: 'uA',
+        nickname: '小A',
+        customKeyword: '民谣专场',
+        authTickets: [neAuth.authTicket]
+      })
+    );
+    const created = await wsA.waitFor((m) => m.type === 'joined_room');
+    const code = created.room.code;
+    assert.equal(created.room.vipStatus.activeList.length, 1);
+
+    wsB.send(JSON.stringify({ type: 'join_room', code, clientId: 'uB', nickname: '小B' }));
+    await wsB.waitFor((m) => m.type === 'joined_room');
+
+    wsB.send(JSON.stringify({ type: 'bind_vip', authTicket: qqAuth.authTicket }));
+    const vipMsg = await wsA.waitFor(
+      (m) => m.type === 'vip_updated' && m.room.vipStatus.activeList.length === 2
+    );
+    assert.equal(vipMsg.room.vipStatus.unlocked, true);
+
+    const rawRoomJson = JSON.stringify(vipMsg.room);
+    assert.equal(rawRoomJson.includes('secret_netease_music_u_9999999999'), false);
+    assert.equal(rawRoomJson.includes('Q_H_L_secret_qq_token_888888'), false);
+
+    // 4. Start Round 1 and verify ZERO singer-name spoiler in round_start!
+    wsA.send(JSON.stringify({ type: 'toggle_ready', ready: true }));
+    wsB.send(JSON.stringify({ type: 'toggle_ready', ready: true }));
+
+    const roundStart = await wsA.waitFor((m) => m.type === 'round_start');
+    const roundStartJson = JSON.stringify(roundStart);
+    assert.equal(
+      roundStartJson.includes('毛不易'),
+      false,
+      'Singer name MUST NEVER appear in round_start payload'
+    );
+    assert.equal(roundStart.room.activeRound.sourceTag, '网易云音乐');
+    assert.equal(capturedCustomKeyword, '民谣专场');
+    assert.equal(capturedAuthSessions.netease.token, 'secret_netease_music_u_9999999999');
+    assert.equal(capturedAuthSessions.qq.token, 'Q_H_L_secret_qq_token_888888');
+
+    // 5. Guess song -> singer name IS revealed in round_reveal
+    wsA.send(JSON.stringify({ type: 'submit_guess', text: '消愁' }));
+    const reveal = await wsA.waitFor((m) => m.type === 'round_reveal');
+    assert.equal(reveal.room.activeRound.revealedSong.singerName, '毛不易');
+  } finally {
+    wsA.close();
+    wsB.close();
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// ==================== 6. LIVE NETEASE & QQ MUSIC QR + CATALOG SMOKE TEST ====================
+test(
+  'Live NetEase & QQ Music QR generation and dynamic Mandarin song sampling',
+  { skip: process.env.CI === 'true' },
+  async () => {
+    const [neQr, qqQr, neSongs, qqSongs] = await Promise.all([
+      neteaseProvider.createQrCode(),
+      qqMusicProvider.createQrCode(),
+      neteaseProvider.sampleLiveSongs({ category: 'classic', allowVip: true }),
+      qqMusicProvider.sampleLiveSongs({ category: 'classic', allowVip: true })
+    ]);
+
+    assert.ok(neQr.qrKey && neQr.qrImgBase64.startsWith('data:image/png;base64,'));
+    assert.ok(qqQr.qrKey && qqQr.qrImgBase64.startsWith('data:image/png;base64,'));
+    assert.ok(neSongs.length > 0, 'Expected live Mandarin songs from NetEase Cloud Music');
+    assert.ok(qqSongs.length > 0, 'Expected live Mandarin songs from QQ Music');
+  }
+);

@@ -1,6 +1,19 @@
 import crypto from 'node:crypto';
 import { computeRankings, isSongNameMatch } from './songUtils.js';
-import { kugouAuth } from './kugouAuth.js';
+import { multiAuth, SUPPORTED_PLATFORMS } from './musicHub.js';
+import { getSafePlatformLabel } from './mandarinCatalog.js';
+
+function sanitizePublicRoundSourceTag(round) {
+  const plat = round?.platform;
+  if (plat === 'kugou') return '酷狗音乐';
+  if (plat === 'netease') return '网易云音乐';
+  if (plat === 'qq') return 'QQ音乐';
+  const raw = String(round?.sourceTag || '');
+  if (raw.includes('网易')) return '网易云音乐';
+  if (/qq/i.test(raw)) return 'QQ音乐';
+  if (raw.includes('酷狗')) return '酷狗音乐';
+  return '华语曲库';
+}
 
 const AVATAR_COLORS = [
   '#ff4d6d',
@@ -41,7 +54,7 @@ export const TOTAL_ROUNDS = 10;
 export class RoomManager {
   constructor(musicService, options = {}) {
     this.musicService = musicService;
-    this.authManager = options.authManager ?? kugouAuth;
+    this.authManager = options.authManager ?? multiAuth;
     this.totalRounds = options.totalRounds ?? TOTAL_ROUNDS;
     this.countdownMs = options.countdownMs ?? 3000;
     this.revealMs = options.revealMs ?? 4500;
@@ -134,6 +147,7 @@ export class RoomManager {
         name: room.name,
         status: room.status,
         category: room.category,
+        customKeyword: room.customKeyword || '',
         roundDurationSec: room.roundDurationSec,
         currentRound: room.currentRound,
         totalRounds: room.totalRounds,
@@ -152,6 +166,7 @@ export class RoomManager {
     let roundPublic = null;
     if (room.activeRound) {
       if (room.status === 'playing' || room.status === 'loading_round') {
+        // NEVER expose singer names, playlist titles, or song titles during active gameplay
         roundPublic = {
           roundNumber: room.activeRound.roundNumber,
           totalRounds: room.totalRounds,
@@ -162,7 +177,7 @@ export class RoomManager {
           startedAt: room.activeRound.startedAt,
           endsAt: room.activeRound.endsAt,
           titleLengthHint: room.activeRound.canonicalTitle.length,
-          sourceTag: room.activeRound.sourceTag
+          sourceTag: sanitizePublicRoundSourceTag(room.activeRound)
         };
       } else if (room.status === 'round_reveal') {
         roundPublic = {
@@ -179,7 +194,7 @@ export class RoomManager {
             rawSongName: room.activeRound.rawSongName,
             singerName: room.activeRound.singerName,
             albumImg: room.activeRound.albumImg,
-            sourceTag: room.activeRound.sourceTag,
+            sourceTag: sanitizePublicRoundSourceTag(room.activeRound),
             winnerClientId: room.activeRound.winnerClientId || null,
             winnerNickname: room.activeRound.winnerNickname || null,
             winTimeMs: room.activeRound.winTimeMs ?? null,
@@ -193,22 +208,61 @@ export class RoomManager {
     const skipVotes = humanPlayers.filter((p) => p.skipVoted).length;
     const skipNeeded = Math.max(1, Math.ceil(humanPlayers.length / 2));
 
-    const envVip = this.authManager?.getEnvDefaultSession?.() || null;
-    const vipStatus = room.vipSession
-      ? {
-          unlocked: true,
-          kugouNickname: room.vipSession.nickname,
-          boundByClientId: room.vipSession.boundByClientId,
-          boundByNickname: room.vipSession.boundByNickname,
+    const envSessions =
+      this.authManager?.getEnvDefaultSessions?.() || {
+        kugou: this.authManager?.getEnvDefaultSession?.() || null,
+        netease: null,
+        qq: null
+      };
+
+    const activeList = [];
+    for (const plat of SUPPORTED_PLATFORMS) {
+      const bound = room.vipSessions?.[plat];
+      const env = envSessions[plat];
+      if (bound) {
+        activeList.push({
+          platform: plat,
+          platformLabel: bound.platformLabel || getSafePlatformLabel(plat),
+          nickname: bound.nickname,
+          boundByClientId: bound.boundByClientId,
+          boundByNickname: bound.boundByNickname,
           isEnvDefault: false
-        }
-      : {
-          unlocked: Boolean(envVip),
-          kugouNickname: envVip ? envVip.nickname : '',
+        });
+      } else if (env) {
+        activeList.push({
+          platform: plat,
+          platformLabel: env.platformLabel || getSafePlatformLabel(plat),
+          nickname: env.nickname,
           boundByClientId: null,
           boundByNickname: null,
-          isEnvDefault: Boolean(envVip)
-        };
+          isEnvDefault: true
+        });
+      }
+    }
+
+    // Legacy fallback if a test mutates room.vipSession directly
+    if (activeList.length === 0 && room.vipSession) {
+      const plat = room.vipSession.platform || 'kugou';
+      activeList.push({
+        platform: plat,
+        platformLabel: getSafePlatformLabel(plat),
+        nickname: room.vipSession.nickname,
+        boundByClientId: room.vipSession.boundByClientId || null,
+        boundByNickname: room.vipSession.boundByNickname || null,
+        isEnvDefault: false
+      });
+    }
+
+    const primary = activeList.find((s) => !s.isEnvDefault) || activeList[0] || null;
+    const vipStatus = {
+      unlocked: activeList.length > 0,
+      kugouNickname: primary ? primary.nickname : '',
+      summaryText: activeList.map((s) => `${s.platformLabel}(${s.nickname})`).join(' · '),
+      boundByClientId: primary?.boundByClientId || null,
+      boundByNickname: primary?.boundByNickname || null,
+      isEnvDefault: activeList.length > 0 && activeList.every((s) => s.isEnvDefault),
+      activeList
+    };
 
     return {
       code: room.code,
@@ -216,6 +270,7 @@ export class RoomManager {
       hostClientId: room.hostClientId,
       isPublic: room.isPublic,
       category: room.category,
+      customKeyword: room.customKeyword || '',
       roundDurationSec: room.roundDurationSec,
       status: room.status,
       currentRound: room.currentRound,
@@ -260,10 +315,19 @@ export class RoomManager {
       token &&
       token === room.activeRound.audioToken
     ) {
+      const plat = room.activeRound.platform || 'kugou';
       return {
+        platform: plat,
         hash: room.activeRound.hash,
+        songId: room.activeRound.songId || '',
+        mid: room.activeRound.mid || '',
+        mediaMid: room.activeRound.mediaMid || '',
+        albumId: room.activeRound.albumId || '',
+        albumAudioId: room.activeRound.albumAudioId || 0,
+        duration: room.activeRound.duration || 180,
         streamUrl: room.activeRound.streamUrl,
-        authSession: room.vipSession || null
+        authSession: room.vipSessions?.[plat] || room.vipSession || null,
+        authSessions: room.vipSessions || null
       };
     }
     return null;
@@ -317,7 +381,7 @@ export class RoomManager {
         this._handleBindVip(ws, msg);
         break;
       case 'unbind_vip':
-        this._handleUnbindVip(ws);
+        this._handleUnbindVip(ws, msg);
         break;
       default:
         this._send(ws, { type: 'error', message: `未知指令: ${type}` });
@@ -403,6 +467,37 @@ export class RoomManager {
     }
   }
 
+  _bindTicketToRoom(room, player, ticket) {
+    const saved = this.authManager?.getAuthSession?.(ticket);
+    if (!saved) return null;
+    const plat = saved.platform || 'kugou';
+    const platformLabel = saved.platformLabel || getSafePlatformLabel(plat);
+    if (!room.vipSessions) {
+      room.vipSessions = { kugou: null, netease: null, qq: null };
+    }
+    const entry = {
+      platform: plat,
+      platformLabel,
+      userid: saved.userid,
+      token: saved.token,
+      nickname: saved.nickname,
+      boundByClientId: player.clientId,
+      boundByNickname: player.nickname
+    };
+    room.vipSessions[plat] = entry;
+    room.vipSession = entry;
+    return entry;
+  }
+
+  _syncPrimaryVipSession(room) {
+    if (!room.vipSessions) {
+      room.vipSession = null;
+      return;
+    }
+    room.vipSession =
+      room.vipSessions.kugou || room.vipSessions.netease || room.vipSessions.qq || null;
+  }
+
   _handleCreateRoom(ws, msg) {
     this._detachPreviousSocket(ws);
 
@@ -410,6 +505,7 @@ export class RoomManager {
     const nickname = String(msg.nickname || '').trim().slice(0, 16) || `歌友${clientId.slice(-4)}`;
     const code = this._generateRoomCode();
     const category = VALID_CATEGORIES.includes(msg.category) ? msg.category : 'all';
+    const customKeyword = String(msg.customKeyword || '').trim().slice(0, 20);
     const roundDurationSec = [30, 45, 60].includes(Number(msg.roundDurationSec))
       ? Number(msg.roundDurationSec)
       : 45;
@@ -437,6 +533,7 @@ export class RoomManager {
       hostClientId: clientId,
       isPublic,
       category,
+      customKeyword,
       roundDurationSec,
       status: 'waiting',
       currentRound: 0,
@@ -444,6 +541,7 @@ export class RoomManager {
       countdownEndsAt: null,
       players: [hostPlayer],
       vipSession: null,
+      vipSessions: { kugou: null, netease: null, qq: null },
       activeRound: null,
       history: [],
       feed: [],
@@ -456,22 +554,17 @@ export class RoomManager {
       botTimers: []
     };
 
-    if (msg.authTicket) {
-      const saved = this.authManager?.getAuthSession?.(msg.authTicket);
-      if (saved) {
-        room.vipSession = {
-          userid: saved.userid,
-          token: saved.token,
-          nickname: saved.nickname,
-          boundByClientId: clientId,
-          boundByNickname: nickname
-        };
-      }
+    const tickets = [];
+    if (Array.isArray(msg.authTickets)) tickets.push(...msg.authTickets);
+    if (msg.authTicket) tickets.push(msg.authTicket);
+    for (const tk of tickets) {
+      this._bindTicketToRoom(room, hostPlayer, tk);
     }
 
+    const kwSuffix = customKeyword ? ` · 专题「${customKeyword}」` : '';
     this._pushFeed(room, {
       type: 'system',
-      text: `${nickname} 创建了华语猜歌房 #${code}（共 ${this.totalRounds} 轮）`
+      text: `${nickname} 创建了华语猜歌房 #${code}（共 ${this.totalRounds} 轮${kwSuffix}）`
     });
 
     this.rooms.set(code, room);
@@ -713,45 +806,70 @@ export class RoomManager {
     if (!ctx) return;
     const { room, player } = ctx;
 
-    const session = this.authManager?.getAuthSession?.(msg?.authTicket);
-    if (!session) {
+    const tickets = [];
+    if (Array.isArray(msg?.authTickets)) tickets.push(...msg.authTickets);
+    if (msg?.authTicket) tickets.push(msg.authTicket);
+
+    const boundEntries = [];
+    for (const tk of tickets) {
+      const entry = this._bindTicketToRoom(room, player, tk);
+      if (entry) boundEntries.push(entry);
+    }
+
+    if (boundEntries.length === 0) {
       this._send(ws, { type: 'error', message: '会员登录凭证已失效，请重新扫码或绑定' });
       return;
     }
 
-    room.vipSession = {
-      userid: session.userid,
-      token: session.token,
-      nickname: session.nickname,
-      boundByClientId: player.clientId,
-      boundByNickname: player.nickname
-    };
-
+    const summary = boundEntries
+      .map((e) => `${e.platformLabel}（${e.nickname}）`)
+      .join('、');
     this._pushFeed(room, {
       type: 'system',
-      text: `${player.nickname} 已登录酷狗账号（${session.nickname}），本房间已开启会员实时拉取`
+      text: `${player.nickname} 已登录 ${summary}，本房间已开启会员实时拉取`
     });
     this._broadcastState(room, 'vip_updated');
   }
 
-  _handleUnbindVip(ws) {
+  _handleUnbindVip(ws, msg) {
     const ctx = this._getBinding(ws);
     if (!ctx) return;
     const { room, player } = ctx;
-    if (!room.vipSession) return;
 
-    if (
-      room.vipSession.boundByClientId !== player.clientId &&
-      room.hostClientId !== player.clientId
-    ) {
+    if (!room.vipSessions) {
+      room.vipSessions = { kugou: null, netease: null, qq: null };
+    }
+
+    const isHost = room.hostClientId === player.clientId;
+    const targetPlat = msg?.platform ? String(msg.platform).toLowerCase() : '';
+    const removedLabels = [];
+
+    for (const plat of SUPPORTED_PLATFORMS) {
+      if (targetPlat && plat !== targetPlat) continue;
+      const entry = room.vipSessions[plat];
+      if (!entry) continue;
+      if (entry.boundByClientId === player.clientId || isHost) {
+        removedLabels.push(entry.platformLabel || getSafePlatformLabel(plat));
+        room.vipSessions[plat] = null;
+      }
+    }
+
+    if (removedLabels.length === 0 && room.vipSession) {
+      if (room.vipSession.boundByClientId === player.clientId || isHost) {
+        removedLabels.push(getSafePlatformLabel(room.vipSession.platform || 'kugou'));
+        room.vipSession = null;
+      }
+    }
+
+    if (removedLabels.length === 0) {
       this._send(ws, { type: 'error', message: '仅绑定者或房主可解除会员绑定' });
       return;
     }
 
-    room.vipSession = null;
+    this._syncPrimaryVipSession(room);
     this._pushFeed(room, {
       type: 'system',
-      text: `${player.nickname} 已解除酷狗会员绑定，恢复默认免费华语曲库`
+      text: `${player.nickname} 已解除 ${removedLabels.join('、')} 会员绑定`
     });
     this._broadcastState(room, 'vip_updated');
   }
@@ -831,7 +949,9 @@ export class RoomManager {
         usedHashes: room.usedHashes,
         usedCanonicalTitles: room.usedCanonicalTitles,
         category: room.category,
-        authSession: room.vipSession
+        customKeyword: room.customKeyword || '',
+        authSession: room.vipSession,
+        authSessions: room.vipSessions
       });
 
       if (!this.rooms.has(room.code)) return;
@@ -846,7 +966,13 @@ export class RoomManager {
       room.activeRound = {
         roundNumber: room.currentRound,
         audioToken,
+        platform: song.platform || 'kugou',
         hash: song.hash,
+        songId: song.songId || '',
+        mid: song.mid || '',
+        mediaMid: song.mediaMid || '',
+        albumId: song.albumId || '',
+        albumAudioId: song.albumAudioId || 0,
         streamUrl: song.streamUrl,
         canonicalTitle: song.canonicalTitle,
         rawSongName: song.rawSongName,
@@ -855,7 +981,7 @@ export class RoomManager {
         duration: song.duration,
         startOffset: song.startOffset,
         startPercent: song.startPercent,
-        sourceTag: song.sourceTag,
+        sourceTag: sanitizePublicRoundSourceTag(song),
         startedAt,
         endsAt,
         winnerClientId: null,
@@ -888,7 +1014,7 @@ export class RoomManager {
         text: `⚠️ 曲库加载失败：${err?.message || '网络异常'}`
       });
       this._broadcastState(room, 'error', {
-        message: err?.message || '酷狗华语曲库拉取失败'
+        message: err?.message || '华语曲库实时拉取失败'
       });
     }
   }

@@ -90,7 +90,7 @@ video {
   overflow-wrap: anywhere;
 }
 
-[hidden] {
+[hidden]:not([hidden='until-found']) {
   display: none !important;
 }
 
@@ -1323,8 +1323,111 @@ dialog::backdrop {
   color: var(--text-primary);
 }
 
+@property --fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.vip-tablist {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-snap-type: inline proximity;
+  scroll-padding-inline: 2.25rem;
+  border-block-end: 1px solid var(--border-subtle);
+  margin-block-end: 0.85rem;
+  --fade-size: 2.25rem;
+  --fade-dir: right;
+  --fade-start-pos: 0;
+  --fade-end-pos: 100%;
+  mask:
+    linear-gradient(black, black) no-clip subtract,
+    linear-gradient(to var(--fade-dir), black, transparent) var(--fade-start-pos) 0 / var(--fade-start) 100% no-repeat no-clip,
+    linear-gradient(to var(--fade-dir), transparent, black) var(--fade-end-pos) 0 / var(--fade-end) 100% no-repeat no-clip;
+  animation: reveal-fade-start linear both, hide-fade-end linear both;
+  animation-timeline: scroll(self inline);
+  animation-range: 0 var(--fade-size), calc(100% - var(--fade-size)) 100%;
+  transition: --fade-start 0.2s, --fade-end 0.2s;
+}
+
+.vip-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+.vip-tablist.more-start {
+  --fade-start: var(--fade-size);
+}
+
+.vip-tablist.more-end {
+  --fade-end: var(--fade-size);
+}
+
+@keyframes reveal-fade-start {
+  to {
+    --fade-start: var(--fade-size);
+  }
+}
+
+@keyframes hide-fade-end {
+  from {
+    --fade-end: var(--fade-size);
+  }
+}
+
+.vip-tab-btn {
+  flex: 1 0 auto;
+  scroll-snap-align: start;
+  position: relative;
+  padding: 0.55rem 0.75rem;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.vip-tab-btn:hover {
+  color: var(--text-primary);
+}
+
+.vip-tab-btn[aria-selected='true'] {
+  color: var(--accent);
+}
+
+.vip-tab-btn[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 3px solid var(--accent);
+}
+
+.vip-panels {
+  display: grid;
+}
+
+.vip-panels > [role='tabpanel'] {
+  grid-area: 1 / 1;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+}
+
+.vip-panel-inner {
+  margin-block-start: 0.75rem;
+}
+
 .manual-auth-details {
-  margin-block-start: 0.85rem;
   border-top: 1px solid var(--border-subtle);
   padding-block-start: 0.75rem;
 }
@@ -1343,7 +1446,7 @@ dialog::backdrop {
 
 .manual-split-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 0.5rem;
 }
 

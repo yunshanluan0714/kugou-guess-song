@@ -6,6 +6,26 @@ const CATEGORY_LABELS = {
   cantonese_ost: '粤语影视'
 };
 
+const PLATFORM_META = {
+  kugou: {
+    label: '酷狗音乐',
+    shortLabel: '酷狗',
+    scanPrompt: '请打开手机「酷狗音乐 APP」扫一扫登录'
+  },
+  netease: {
+    label: '网易云音乐',
+    shortLabel: '网易云',
+    scanPrompt: '请打开手机「网易云音乐 APP」扫一扫登录'
+  },
+  qq: {
+    label: 'QQ 音乐',
+    shortLabel: 'QQ音乐',
+    scanPrompt: '请打开「手机 QQ」扫一扫授权登录 QQ 音乐'
+  }
+};
+
+const SAFE_PUBLIC_TAGS = new Set(['酷狗音乐', '网易云音乐', 'QQ音乐', '华语曲库']);
+
 function resolveApiOrigin() {
   const params = new URLSearchParams(location.search);
   const queryApi = params.get('api');
@@ -40,9 +60,9 @@ function getSessionClientId() {
   let id = sessionStorage.getItem('kugou_guess_client_id');
   if (!id) {
     id =
-      (typeof crypto !== 'undefined' && crypto.randomUUID
+      typeof crypto !== 'undefined' && crypto.randomUUID
         ? crypto.randomUUID()
-        : `cli_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+        : `cli_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     sessionStorage.setItem('kugou_guess_client_id', id);
   }
   return id;
@@ -60,15 +80,47 @@ function formatDurationMs(ms) {
   return `${(ms / 1000).toFixed(1)} 秒`;
 }
 
-// ==================== PROGRESSIVE DIALOG FALLBACKS ====================
-function setupNativeDialogEnhancements() {
+// ==================== PROGRESSIVE WEB PLATFORM ENHANCEMENTS ====================
+async function setupModernWebEnhancements() {
+  // Conditional focusgroup polyfill (modern-web-guidance: tabs)
+  if (!Object.hasOwn(HTMLElement.prototype, 'focusGroup')) {
+    try {
+      const { polyfill } = await import('@microsoft/focusgroup-polyfill');
+      polyfill();
+    } catch {
+      // Graceful fallback when running standalone without importmap target
+    }
+  }
+
+  // IntersectionObserver fallback for scroll-driven tablist edge fades
+  if (!CSS.supports('animation-timeline', 'scroll()')) {
+    for (const scroller of document.querySelectorAll('.vip-tablist')) {
+      const first = scroller.firstElementChild;
+      const last = scroller.lastElementChild;
+      if (!first || !last) continue;
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const { target, intersectionRatio } of entries) {
+            scroller.classList.toggle(
+              target === first ? 'more-start' : 'more-end',
+              intersectionRatio < 1
+            );
+          }
+        },
+        { root: scroller, threshold: 1, rootMargin: '1px' }
+      );
+      observer.observe(first);
+      observer.observe(last);
+    }
+  }
+
+  // Native <dialog> progressive fallbacks
   for (const dialog of document.querySelectorAll('dialog')) {
     dialog.addEventListener('close', () => {
       dialog.returnValue = '';
     });
   }
 
-  // Fallback for closedby="any" (e.g. Safari)
   if (!('closedBy' in HTMLDialogElement.prototype)) {
     const isOutside = (e, dialog) => {
       const r = dialog.getBoundingClientRect();
@@ -90,7 +142,6 @@ function setupNativeDialogEnhancements() {
     }
   }
 
-  // Fallback when Invoker Commands (command / commandfor) are unavailable
   if (!('commandForElement' in HTMLButtonElement.prototype)) {
     for (const btn of document.querySelectorAll('button[command][commandfor]')) {
       btn.addEventListener('click', () => {
@@ -109,9 +160,16 @@ const state = {
   clientId: getSessionClientId(),
   ws: null,
   room: null,
-  vipAuth: null, // { authTicket, nickname, userid }
+  activeVipPlatform: 'kugou',
+  vipAccounts: {
+    kugou: null,
+    netease: null,
+    qq: null
+  },
   qrKey: '',
+  qrPlatform: 'kugou',
   qrPollTimer: null,
+  qrReqSeq: 0,
   currentAudioKey: null,
   audioMuted: false,
   audioUnlocked: false,
@@ -136,6 +194,7 @@ const els = {
   nicknameInput: document.getElementById('nickname-input'),
   nicknameError: document.getElementById('nickname-error'),
   roomNameInput: document.getElementById('room-name-input'),
+  customKeywordInput: document.getElementById('custom-keyword-input'),
 
   joinForm: document.getElementById('join-room-form'),
   roomCodeInput: document.getElementById('room-code-input'),
@@ -198,6 +257,8 @@ const els = {
   roundHistoryList: document.getElementById('round-history-list'),
 
   vipDialog: document.getElementById('vip-dialog'),
+  vipTabs: Array.from(document.querySelectorAll('.vip-tab-btn')),
+  vipPanels: Array.from(document.querySelectorAll('.vip-panels > [role="tabpanel"]')),
   vipActiveBox: document.getElementById('vip-active-box'),
   vipActiveName: document.getElementById('vip-active-name'),
   logoutVipBtn: document.getElementById('logout-vip-btn'),
@@ -205,11 +266,7 @@ const els = {
   qrPlaceholder: document.getElementById('qr-placeholder'),
   qrStatusText: document.getElementById('qr-status-text'),
   refreshQrBtn: document.getElementById('refresh-qr-btn'),
-  manualVipForm: document.getElementById('manual-vip-form'),
-  vipCookieInput: document.getElementById('vip-cookie-input'),
-  vipUseridInput: document.getElementById('vip-userid-input'),
-  vipTokenInput: document.getElementById('vip-token-input'),
-  vipFormError: document.getElementById('vip-form-error'),
+  manualVipForms: Array.from(document.querySelectorAll('.manual-vip-form')),
 
   audioEl: document.getElementById('game-audio')
 };
@@ -240,11 +297,24 @@ function getValidatedNickname() {
   return nick;
 }
 
+function getActiveVipList() {
+  return ['kugou', 'netease', 'qq']
+    .map((p) => state.vipAccounts[p])
+    .filter((acc) => Boolean(acc?.authTicket));
+}
+
+function getActiveVipTickets() {
+  return getActiveVipList().map((acc) => acc.authTicket);
+}
+
+function persistVipAccounts() {
+  sessionStorage.setItem('guess_song_vip_accounts', JSON.stringify(state.vipAccounts));
+}
+
 // ==================== AUDIO UNLOCK & PLAYBACK ====================
 function unlockAudioElement() {
   if (state.audioUnlocked) return;
   try {
-    // Play a tiny silent WAV data URI inside user gesture to unlock autoplay
     const silentWav =
       'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
     els.audioEl.src = silentWav;
@@ -387,9 +457,11 @@ function connectWebSocket() {
 
   ws.addEventListener('open', () => {
     setConnStatus('online');
-    // Rejoin room if disconnected mid-match
     if (state.room?.code) {
-      const nick = els.nicknameInput.value.trim() || sessionStorage.getItem('kugou_guess_nickname') || '歌友';
+      const nick =
+        els.nicknameInput.value.trim() ||
+        sessionStorage.getItem('kugou_guess_nickname') ||
+        '歌友';
       sendWs({
         type: 'join_room',
         code: state.room.code,
@@ -427,12 +499,17 @@ function handleServerMessage(msg) {
         state.room = msg.room;
         renderCurrentRoom();
       }
-      if (
-        msg.type === 'joined_room' &&
-        state.vipAuth?.authTicket &&
-        !msg.room?.vipStatus?.unlocked
-      ) {
-        sendWs({ type: 'bind_vip', authTicket: state.vipAuth.authTicket });
+      if (msg.type === 'joined_room') {
+        const myActive = getActiveVipList();
+        const boundPlats = new Set(
+          (msg.room?.vipStatus?.activeList || []).map((x) => x.platform)
+        );
+        const missingTickets = myActive
+          .filter((acc) => !boundPlats.has(acc.platform))
+          .map((acc) => acc.authTicket);
+        if (missingTickets.length > 0) {
+          sendWs({ type: 'bind_vip', authTickets: missingTickets });
+        }
       }
       if (msg.type === 'round_reveal' && msg.room?.activeRound?.revealedSong) {
         const rev = msg.room.activeRound.revealedSong;
@@ -459,11 +536,7 @@ function handleServerMessage(msg) {
       break;
 
     case 'guess_result':
-      if (msg.correct) {
-        els.guessInput.value = '';
-      } else {
-        els.guessInput.value = '';
-      }
+      els.guessInput.value = '';
       break;
 
     case 'error':
@@ -505,7 +578,8 @@ function renderCurrentRoom() {
 function renderLobby(room) {
   els.lobbyRoomCode.textContent = room.code;
   els.lobbyRoomName.textContent = room.name;
-  els.lobbyRoomDesc.textContent = `${CATEGORY_LABELS[room.category] || '全部华语'} · ${room.totalRounds} 轮 · ${room.roundDurationSec} 秒/轮`;
+  const kwText = room.customKeyword ? `专题「${room.customKeyword}」 · ` : '';
+  els.lobbyRoomDesc.textContent = `${kwText}${CATEGORY_LABELS[room.category] || '全部华语'} · ${room.totalRounds} 轮 · ${room.roundDurationSec} 秒/轮`;
 
   const players = room.players || [];
   els.lobbyPlayerCount.textContent = String(players.length);
@@ -531,22 +605,24 @@ function renderLobby(room) {
     }
   }
 
-  // Render Room VIP Unlock Status
+  // Render Room Multi-Platform VIP Status
   const vipStatus = room.vipStatus;
   if (vipStatus?.unlocked) {
     els.lobbyVipBar.classList.add('is-unlocked');
-    const who = vipStatus.isEnvDefault
-      ? '系统默认会员'
-      : `${vipStatus.kugouNickname || '酷狗会员'}（由 ${vipStatus.boundByNickname || '房主'} 共享）`;
-    els.lobbyVipText.textContent = `✓ 已开启会员实时拉取：${who}`;
-    els.lobbyVipBtn.textContent = '切换账号';
-    const canUnbind =
-      !vipStatus.isEnvDefault &&
-      (vipStatus.boundByClientId === state.clientId || room.hostClientId === state.clientId);
+    const summary = vipStatus.summaryText || vipStatus.kugouNickname || '音乐会员';
+    els.lobbyVipText.textContent = `✓ 已开启百万级线上全曲库实时拉取：${summary}`;
+    els.lobbyVipBtn.textContent = '管理平台会员';
+    const activeList = vipStatus.activeList || [];
+    const canUnbind = activeList.some(
+      (item) =>
+        !item.isEnvDefault &&
+        (item.boundByClientId === state.clientId || room.hostClientId === state.clientId)
+    );
     els.unbindVipBtn.hidden = !canUnbind;
   } else {
     els.lobbyVipBar.classList.remove('is-unlocked');
-    els.lobbyVipText.textContent = '曲库：免费华语曲库（登录会员可解锁 VIP 原版全曲库）';
+    els.lobbyVipText.textContent =
+      '曲库：三平台实时联网华语池（登录酷狗 / 网易云 / QQ音乐会员可解锁 VIP 原版全曲库）';
     els.lobbyVipBtn.textContent = '登录会员解锁全曲库';
     els.unbindVipBtn.hidden = true;
   }
@@ -596,7 +672,9 @@ function renderLobby(room) {
 
   if (self) {
     els.readyToggleBtn.textContent = self.ready ? '取消准备' : '准备就绪';
-    els.readyToggleBtn.className = self.ready ? 'btn btn-outline btn-block' : 'btn btn-primary btn-block';
+    els.readyToggleBtn.className = self.ready
+      ? 'btn btn-outline btn-block'
+      : 'btn btn-primary btn-block';
     els.soloStartBtn.hidden = !(players.length === 1 && self.ready && room.status === 'waiting');
   }
 }
@@ -604,7 +682,10 @@ function renderLobby(room) {
 function renderGame(room) {
   const round = room.activeRound;
   els.gameRoundNum.textContent = String(room.currentRound || 1);
-  els.gameSourceTag.textContent = round?.sourceTag || '酷狗华语';
+
+  // Strict client-side anti-spoiler guard: only show platform name, never singer/playlist names
+  const rawTag = round?.sourceTag || '华语曲库';
+  els.gameSourceTag.textContent = SAFE_PUBLIC_TAGS.has(rawTag) ? rawTag : '华语曲库';
 
   const self = room.players.find((p) => p.clientId === state.clientId);
   els.skipVoteBtn.textContent = `${self?.skipVoted ? '已投跳过' : '跳过'} (${room.skipVotes}/${room.skipNeeded})`;
@@ -612,7 +693,7 @@ function renderGame(room) {
 
   if (room.status === 'loading_round') {
     stopRoundAudio();
-    els.playingStatusTitle.textContent = '正在抽取华语歌曲…';
+    els.playingStatusTitle.textContent = '正在实时检索华语歌曲…';
     els.songHintText.textContent = '加载中';
     els.roundRevealBox.hidden = true;
     els.revealCoverImg.hidden = true;
@@ -701,7 +782,6 @@ function updateLiveScoreboard(rankings) {
   const container = els.liveScoreboard;
   const activeIds = new Set(rankings.map((r) => r.clientId));
 
-  // Remove stale nodes for players who left
   for (const [id, node] of state.scoreNodeMap.entries()) {
     if (!activeIds.has(id)) {
       node.remove();
@@ -799,15 +879,14 @@ function renderResult(room) {
     ? `冠军：${champion.nickname}（${champion.score} 分）`
     : '十轮最终排名';
 
-  const medals = ['第 1 名', '第 2 名', '第 3 名'];
   els.podiumGrid.innerHTML = '';
-  rankings.slice(0, 3).forEach((r, idx) => {
+  rankings.slice(0, 3).forEach((r) => {
     const card = document.createElement('div');
     card.className = `podium-card rank-${r.rank}`;
 
     const medal = document.createElement('div');
     medal.className = 'podium-medal';
-    medal.textContent = `第 ${r.rank} 名` || medals[idx];
+    medal.textContent = `第 ${r.rank} 名`;
 
     const name = document.createElement('div');
     name.className = 'podium-name';
@@ -924,15 +1003,17 @@ els.createForm.addEventListener('submit', (e) => {
 
   unlockAudioElement();
   const data = new FormData(els.createForm);
+  const authTickets = getActiveVipTickets();
   sendWs({
     type: 'create_room',
     clientId: state.clientId,
     nickname,
     roomName: String(data.get('roomName') || '').trim(),
+    customKeyword: String(data.get('customKeyword') || '').trim(),
     category: String(data.get('category') || 'all'),
     roundDurationSec: Number(data.get('roundDurationSec') || 45),
     isPublic: true,
-    authTicket: state.vipAuth?.authTicket || undefined
+    authTickets: authTickets.length > 0 ? authTickets : undefined
   });
 });
 
@@ -994,7 +1075,7 @@ els.playAgainBtn.addEventListener('click', () => {
   sendWs({ type: 'play_again' });
 });
 
-// ==================== IME-SAFE ENTER SUBMIT (modern-web-guidance) ====================
+// ==================== IME-SAFE ENTER SUBMIT ====================
 let lastCompositionEndAt = null;
 
 els.guessInput.addEventListener('compositionend', (event) => {
@@ -1029,7 +1110,7 @@ els.guessForm.addEventListener('submit', (e) => {
   els.guessInput.focus();
 });
 
-// ==================== KUGOU MEMBER LOGIN (QR + TOKEN) ====================
+// ==================== MULTI-PLATFORM VIP LOGIN (KuGou + NetEase + QQ) ====================
 function stopQrPolling() {
   if (state.qrPollTimer) {
     clearInterval(state.qrPollTimer);
@@ -1037,88 +1118,161 @@ function stopQrPolling() {
   }
 }
 
-function updateHeaderVipButton() {
-  if (state.vipAuth?.authTicket) {
-    els.openVipBtn.textContent = `✓ ${state.vipAuth.nickname}`;
+function updateVipUiState() {
+  for (const plat of ['kugou', 'netease', 'qq']) {
+    const labelEl = document.getElementById(`tab-label-${plat}`);
+    const acc = state.vipAccounts[plat];
+    if (labelEl) {
+      labelEl.textContent = acc?.authTicket
+        ? `${PLATFORM_META[plat].label} ✓`
+        : PLATFORM_META[plat].label;
+    }
+  }
+
+  const activeList = getActiveVipList();
+  if (activeList.length > 0) {
+    els.openVipBtn.textContent =
+      activeList.length === 1
+        ? `✓ ${PLATFORM_META[activeList[0].platform].shortLabel}·${activeList[0].nickname}`
+        : `✓ 已登 ${activeList.length} 平台`;
     els.openVipBtn.classList.add('btn-vip-active');
-    els.vipActiveBox.hidden = false;
-    els.vipActiveName.textContent = `当前已登录：${state.vipAuth.nickname}`;
   } else {
     els.openVipBtn.textContent = '会员登录';
     els.openVipBtn.classList.remove('btn-vip-active');
+  }
+
+  const currentAcc = state.vipAccounts[state.activeVipPlatform];
+  if (currentAcc?.authTicket) {
+    els.vipActiveBox.hidden = false;
+    els.vipActiveName.textContent = `已登录${PLATFORM_META[state.activeVipPlatform].label}：${currentAcc.nickname}`;
+  } else {
     els.vipActiveBox.hidden = true;
   }
 }
 
+function selectVipPlatform(platform, { fetchQr = true } = {}) {
+  const normPlat = PLATFORM_META[platform] ? platform : 'kugou';
+  state.activeVipPlatform = normPlat;
+
+  let selectedTab = null;
+  for (const tab of els.vipTabs) {
+    const isSel = tab.dataset.platform === normPlat;
+    tab.ariaSelected = String(isSel);
+    tab.toggleAttribute('focusgroupstart', isSel);
+    if (isSel) selectedTab = tab;
+  }
+
+  if (selectedTab) {
+    try {
+      selectedTab.scrollIntoView({ block: 'nearest', inline: 'nearest', container: 'nearest' });
+    } catch {
+      selectedTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
+  for (const panel of els.vipPanels) {
+    const isSel = panel.dataset.platform === normPlat;
+    panel.hidden = isSel ? false : 'until-found';
+  }
+
+  updateVipUiState();
+
+  if (fetchQr && els.vipDialog.open) {
+    startQrLoginFlow(normPlat);
+  }
+}
+
+for (const tab of els.vipTabs) {
+  tab.addEventListener('click', () => {
+    selectVipPlatform(tab.dataset.platform, { fetchQr: true });
+  });
+}
+
+for (const panel of els.vipPanels) {
+  panel.addEventListener('beforematch', () => {
+    selectVipPlatform(panel.dataset.platform, { fetchQr: true });
+  });
+}
+
 function applyAuthorizedSession(authData) {
   stopQrPolling();
-  state.vipAuth = {
+  const plat = PLATFORM_META[authData.platform] ? authData.platform : state.activeVipPlatform;
+  state.vipAccounts[plat] = {
+    platform: plat,
     authTicket: authData.authTicket,
     nickname: authData.nickname,
     userid: authData.userid
   };
-  sessionStorage.setItem('kugou_vip_auth', JSON.stringify(state.vipAuth));
-  updateHeaderVipButton();
+  persistVipAccounts();
+  updateVipUiState();
 
   if (state.room?.code) {
-    sendWs({ type: 'bind_vip', authTicket: state.vipAuth.authTicket });
+    sendWs({ type: 'bind_vip', authTicket: authData.authTicket });
   }
   if (els.vipDialog.open) {
     els.vipDialog.close();
   }
-  showToast(`已登录酷狗账号：${state.vipAuth.nickname}`);
+  showToast(`已登录${PLATFORM_META[plat].label}：${authData.nickname}`);
 }
 
-async function startQrLoginFlow() {
+async function startQrLoginFlow(platform = state.activeVipPlatform) {
   stopQrPolling();
+  const meta = PLATFORM_META[platform] || PLATFORM_META.kugou;
+  const reqId = ++state.qrReqSeq;
   state.qrKey = '';
+  state.qrPlatform = platform;
+
   els.qrCodeImg.hidden = true;
   els.qrPlaceholder.hidden = false;
   els.qrPlaceholder.textContent = '正在获取二维码…';
-  els.qrStatusText.textContent = '正在连接酷狗登录服务…';
+  els.qrStatusText.textContent = `正在连接${meta.label}登录服务…`;
 
   try {
-    const res = await fetch(apiUrl('/api/kugou/qr/create'), { method: 'POST' });
+    const res = await fetch(apiUrl(`/api/auth/${platform}/qr/create`), { method: 'POST' });
     const data = await res.json();
+    if (reqId !== state.qrReqSeq) return;
+
     if (!data.ok || !data.qrKey) {
       els.qrPlaceholder.textContent = '获取失败';
-      els.qrStatusText.textContent = data.error || '无法获取二维码，请重试';
+      els.qrStatusText.textContent = data.error || '无法获取二维码，请点击刷新';
       return;
     }
 
     state.qrKey = data.qrKey;
     els.qrCodeImg.src = data.qrImgBase64;
+    els.qrCodeImg.alt = `${meta.label}扫码登录二维码`;
     els.qrCodeImg.hidden = false;
     els.qrPlaceholder.hidden = true;
-    els.qrStatusText.textContent = '请打开手机「酷狗音乐 APP」扫一扫登录';
+    els.qrStatusText.textContent = meta.scanPrompt;
 
     state.qrPollTimer = setInterval(async () => {
-      if (!els.vipDialog.open || !state.qrKey) {
+      if (!els.vipDialog.open || !state.qrKey || state.activeVipPlatform !== platform) {
         stopQrPolling();
         return;
       }
       try {
         const chkRes = await fetch(
-          apiUrl(`/api/kugou/qr/check?key=${encodeURIComponent(state.qrKey)}`)
+          apiUrl(`/api/auth/${platform}/qr/check?key=${encodeURIComponent(state.qrKey)}`)
         );
         const chk = await chkRes.json();
-        if (!chk.ok) return;
+        if (!chk.ok || state.activeVipPlatform !== platform) return;
 
         if (chk.state === 'expired') {
           stopQrPolling();
-          els.qrStatusText.textContent = '二维码已过期，请点击下方按钮刷新';
+          els.qrStatusText.textContent = chk.message || '二维码已过期，请点击刷新';
         } else if (chk.state === 'scanned') {
           els.qrStatusText.textContent = chk.nickname
             ? `${chk.nickname} 已扫码，请在手机上点击确认登录`
-            : '已扫码，请在手机上点击确认登录';
+            : chk.message || '已扫码，请在手机上点击确认登录';
         } else if (chk.state === 'authorized' && chk.authTicket) {
-          applyAuthorizedSession(chk);
+          applyAuthorizedSession({ ...chk, platform });
         }
       } catch {
         // Ignore transient poll errors
       }
     }, 2000);
   } catch {
+    if (reqId !== state.qrReqSeq) return;
     els.qrPlaceholder.textContent = '网络异常';
     els.qrStatusText.textContent = '连接登录接口失败，请稍后重试';
   }
@@ -1126,17 +1280,19 @@ async function startQrLoginFlow() {
 
 els.openVipBtn.addEventListener('click', () => {
   setTimeout(() => {
-    if (els.vipDialog.open) startQrLoginFlow();
+    if (els.vipDialog.open) startQrLoginFlow(state.activeVipPlatform);
   }, 20);
 });
 
 els.lobbyVipBtn.addEventListener('click', () => {
   setTimeout(() => {
-    if (els.vipDialog.open) startQrLoginFlow();
+    if (els.vipDialog.open) startQrLoginFlow(state.activeVipPlatform);
   }, 20);
 });
 
-els.refreshQrBtn.addEventListener('click', startQrLoginFlow);
+els.refreshQrBtn.addEventListener('click', () => {
+  startQrLoginFlow(state.activeVipPlatform);
+});
 
 els.vipDialog.addEventListener('close', () => {
   stopQrPolling();
@@ -1146,56 +1302,65 @@ els.unbindVipBtn.addEventListener('click', () => {
   sendWs({ type: 'unbind_vip' });
 });
 
-els.logoutVipBtn.addEventListener('click', async () => {
-  const prevTicket = state.vipAuth?.authTicket;
-  state.vipAuth = null;
-  sessionStorage.removeItem('kugou_vip_auth');
-  updateHeaderVipButton();
+els.logoutVipBtn.addEventListener('click', () => {
+  const plat = state.activeVipPlatform;
+  const prev = state.vipAccounts[plat];
+  state.vipAccounts[plat] = null;
+  persistVipAccounts();
+  updateVipUiState();
 
   if (state.room?.code) {
-    sendWs({ type: 'unbind_vip' });
+    sendWs({ type: 'unbind_vip', platform: plat });
   }
-  if (prevTicket) {
-    fetch(apiUrl('/api/kugou/auth/logout'), {
+  if (prev?.authTicket) {
+    fetch(apiUrl('/api/auth/logout'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ authTicket: prevTicket })
+      body: JSON.stringify({ authTicket: prev.authTicket })
     }).catch(() => {});
   }
-  showToast('已退出酷狗账号');
+  showToast(`已退出${PLATFORM_META[plat].label}账号`);
 });
 
-els.manualVipForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  els.vipFormError.textContent = '';
+for (const form of els.manualVipForms) {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const plat = form.dataset.platform || 'kugou';
+    const errEl = form.querySelector(`[data-error-for="${plat}"]`);
+    if (errEl) errEl.textContent = '';
 
-  const cookie = els.vipCookieInput.value.trim();
-  const userid = els.vipUseridInput.value.trim();
-  const token = els.vipTokenInput.value.trim();
+    const fd = new FormData(form);
+    const cookie = String(fd.get('cookie') || '').trim();
+    const userid = String(fd.get('userid') || '').trim();
+    const token = String(fd.get('token') || '').trim();
 
-  if (!cookie && (!userid || !token)) {
-    els.vipFormError.textContent = '请粘贴完整 Cookie，或同时填写 userid 与 token';
-    return;
-  }
-
-  try {
-    const res = await fetch(apiUrl('/api/kugou/auth/manual'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cookie, userid, token })
-    });
-    const data = await res.json();
-    if (!data.ok || !data.authTicket) {
-      els.vipFormError.textContent = data.error || '凭证校验失败';
+    if (plat === 'netease' && !cookie && !token) {
+      if (errEl) errEl.textContent = '请粘贴包含 MUSIC_U 的 Cookie 或 MUSIC_U 字符串';
       return;
     }
-    els.vipCookieInput.value = '';
-    els.vipTokenInput.value = '';
-    applyAuthorizedSession(data);
-  } catch {
-    els.vipFormError.textContent = '请求失败，请检查网络连接';
-  }
-});
+    if (plat !== 'netease' && !cookie && (!userid || !token)) {
+      if (errEl) errEl.textContent = '请粘贴完整 Cookie，或同时填写账号 ID 与密钥';
+      return;
+    }
+
+    try {
+      const res = await fetch(apiUrl(`/api/auth/${plat}/manual`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie, userid, token })
+      });
+      const data = await res.json();
+      if (!data.ok || !data.authTicket) {
+        if (errEl) errEl.textContent = data.error || '凭证校验失败';
+        return;
+      }
+      form.reset();
+      applyAuthorizedSession({ ...data, platform: plat });
+    } catch {
+      if (errEl) errEl.textContent = '请求失败，请检查网络连接';
+    }
+  });
+}
 
 // ==================== INITIAL DATA FETCH ====================
 async function refreshHealth() {
@@ -1203,14 +1368,13 @@ async function refreshHealth() {
     const res = await fetch(apiUrl('/api/health'));
     const data = await res.json();
     if (data.ok) {
-      const freeCount = data.uniqueSongs || data.poolSize;
-      const allCount = data.totalWithVipUniqueSongs || freeCount;
+      const warmCount = data.totalWithVipUniqueSongs || data.uniqueSongs || data.poolSize || 0;
       els.poolBadge.textContent =
-        allCount > freeCount
-          ? `免费 ${freeCount} 首 · VIP全库 ${allCount} 首`
-          : `已收录 ${freeCount} 首`;
+        warmCount > 0
+          ? `实时联网百万全库（秒开预热 ${warmCount} 首）`
+          : '实时联网百万全库';
     } else {
-      els.poolBadge.textContent = '曲库同步中';
+      els.poolBadge.textContent = '实时曲库同步中';
     }
   } catch {
     els.poolBadge.textContent = '曲库连接中';
@@ -1249,7 +1413,8 @@ async function refreshPublicRooms() {
           : r.status === 'finished'
             ? '已结束'
             : `第 ${r.currentRound}/${r.totalRounds} 轮`;
-      meta.textContent = `${r.playerCount}/${r.maxPlayers} 人 · ${CATEGORY_LABELS[r.category] || '全部华语'} · ${statusText}`;
+      const kwLabel = r.customKeyword ? `专题「${r.customKeyword}」 · ` : '';
+      meta.textContent = `${r.playerCount}/${r.maxPlayers} 人 · ${kwLabel}${CATEGORY_LABELS[r.category] || '全部华语'} · ${statusText}`;
 
       info.append(title, meta);
 
@@ -1278,7 +1443,7 @@ async function refreshPublicRooms() {
 }
 
 function initApp() {
-  setupNativeDialogEnhancements();
+  setupModernWebEnhancements();
 
   const savedNick = sessionStorage.getItem('kugou_guess_nickname');
   if (savedNick) {
@@ -1286,14 +1451,24 @@ function initApp() {
   }
 
   try {
-    const savedVip = JSON.parse(sessionStorage.getItem('kugou_vip_auth') || 'null');
-    if (savedVip?.authTicket) {
-      state.vipAuth = savedVip;
+    const savedMulti = JSON.parse(sessionStorage.getItem('guess_song_vip_accounts') || 'null');
+    if (savedMulti && typeof savedMulti === 'object') {
+      for (const plat of ['kugou', 'netease', 'qq']) {
+        if (savedMulti[plat]?.authTicket) {
+          state.vipAccounts[plat] = savedMulti[plat];
+        }
+      }
+    }
+    const legacyKg = JSON.parse(sessionStorage.getItem('kugou_vip_auth') || 'null');
+    if (legacyKg?.authTicket && !state.vipAccounts.kugou) {
+      state.vipAccounts.kugou = { platform: 'kugou', ...legacyKg };
+      sessionStorage.removeItem('kugou_vip_auth');
+      persistVipAccounts();
     }
   } catch {
     // Ignore corrupted storage
   }
-  updateHeaderVipButton();
+  updateVipUiState();
 
   const params = new URLSearchParams(location.search);
   const roomParam = params.get('room');

@@ -17,22 +17,27 @@
       </view>
 
       <view class="vip-row {{room.vipStatus && room.vipStatus.unlocked ? 'unlocked' : ''}}">
-        <text wx:if="{{room.vipStatus && room.vipStatus.unlocked}}">✓ 已开启会员实时拉取：{{room.vipStatus.kugouNickname}}</text>
-        <text wx:else>曲库：免费华语池（可登录会员解锁 VIP 原版）</text>
+        <text wx:if="{{room.vipStatus && room.vipStatus.unlocked}}">✓ 已开启会员实时拉取：{{room.vipStatus.summaryText || room.vipStatus.kugouNickname}}</text>
+        <text wx:else>曲库：三平台实时华语池（可登录酷狗/网易云/QQ音乐会员）</text>
         <view class="row-gap">
           <button class="btn-ghost" size="mini" bindtap="onToggleVipPanel">
-            {{showVipPanel ? '收起' : (room.vipStatus && room.vipStatus.unlocked ? '切换' : '会员登录')}}
+            {{showVipPanel ? '收起' : (room.vipStatus && room.vipStatus.unlocked ? '管理会员' : '会员登录')}}
           </button>
           <button wx:if="{{room.vipStatus && room.vipStatus.unlocked && !room.vipStatus.isEnvDefault}}" class="btn-ghost" size="mini" bindtap="onUnbindVip">解绑</button>
         </view>
       </view>
 
       <view wx:if="{{showVipPanel}}" class="vip-panel">
+        <view class="row-gap" style="justify-content: center; margin-bottom: 16rpx;">
+          <button class="{{vipPlatform === 'kugou' ? 'btn-primary' : 'btn-ghost'}}" size="mini" data-platform="kugou" bindtap="onSelectVipPlatform">酷狗音乐</button>
+          <button class="{{vipPlatform === 'netease' ? 'btn-primary' : 'btn-ghost'}}" size="mini" data-platform="netease" bindtap="onSelectVipPlatform">网易云音乐</button>
+          <button class="{{vipPlatform === 'qq' ? 'btn-primary' : 'btn-ghost'}}" size="mini" data-platform="qq" bindtap="onSelectVipPlatform">QQ音乐</button>
+        </view>
         <image wx:if="{{qrImgBase64}}" class="qr-img" src="{{qrImgBase64}}" mode="aspectFit" />
         <view class="muted" style="margin: 12rpx 0;">{{qrStatusText}}</view>
         <button class="btn-ghost" size="mini" bindtap="onRefreshQr">刷新二维码</button>
         <view class="vip-cookie-row">
-          <input class="input-box" placeholder="或粘贴 Cookie (含 userid 和 token)" value="{{vipCookie}}" bindinput="onVipCookieInput" />
+          <input class="input-box" placeholder="或粘贴对应平台 Cookie / Token" value="{{vipCookie}}" bindinput="onVipCookieInput" />
           <button class="btn-primary" size="mini" bindtap="onSubmitVipCookie">绑定</button>
         </view>
       </view>

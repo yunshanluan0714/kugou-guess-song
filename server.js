@@ -3,16 +3,17 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { kugouService } from './src/kugouService.js';
-import { kugouAuth, parseCookieCredentials } from './src/kugouAuth.js';
+import { parseCookieCredentials } from './src/kugouAuth.js';
+import { multiAuth, musicHub, SUPPORTED_PLATFORMS } from './src/musicHub.js';
+import { MANDARIN_ARTIST_CATALOG } from './src/mandarinCatalog.js';
 import { RoomManager } from './src/roomManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export function createAppServer({
-  musicService = kugouService,
-  authManager = kugouAuth,
+  musicService = musicHub,
+  authManager = multiAuth,
   roomOptions = {}
 } = {}) {
   const app = express();
@@ -38,6 +39,10 @@ export function createAppServer({
   });
 
   app.use(express.json({ limit: '32kb' }));
+  app.use(
+    '/vendor/focusgroup-polyfill',
+    express.static(path.join(__dirname, 'node_modules/@microsoft/focusgroup-polyfill/build'))
+  );
   app.use(express.static(path.join(__dirname, 'public')));
 
   app.get('/api/health', async (_req, res) => {
@@ -47,6 +52,9 @@ export function createAppServer({
       res.json({
         ok: true,
         mandarinOnly: true,
+        dynamicLiveSearch: true,
+        platforms: SUPPORTED_PLATFORMS,
+        artistCatalogCount: MANDARIN_ARTIST_CATALOG.length,
         poolSize: stats.totalTracks,
         uniqueSongs: stats.uniqueSongs,
         vipTracks: stats.vipTracks || 0,
@@ -71,34 +79,44 @@ export function createAppServer({
     });
   });
 
-  // ==================== KUGOU MEMBER LOGIN API ====================
-  app.post('/api/kugou/qr/create', async (_req, res) => {
+  // ==================== MULTI-PLATFORM MEMBER LOGIN API ====================
+  async function handleQrCreate(platform, res) {
     try {
-      const qr = await authManager.createQrCode();
-      res.json({ ok: true, ...qr });
+      const qr = await authManager.createQrCode(platform);
+      res.json({ ok: true, platform, ...qr });
     } catch (err) {
       res.status(502).json({
         ok: false,
-        error: err?.message || '创建酷狗扫码二维码失败'
+        error: err?.message || '创建扫码二维码失败'
       });
     }
-  });
+  }
 
-  app.get('/api/kugou/qr/check', async (req, res) => {
+  async function handleQrCheck(platform, req, res) {
     try {
       const key = String(req.query.key || '').trim();
-      const result = await authManager.checkQrCode(key);
-      res.json({ ok: true, ...result });
+      const result =
+        typeof authManager.checkQrCode === 'function'
+          ? await authManager.checkQrCode(key, platform)
+          : { state: 'waiting' };
+      res.json({ ok: true, platform, ...result });
     } catch (err) {
       res.status(400).json({
         ok: false,
         error: err?.message || '查询扫码状态失败'
       });
     }
-  });
+  }
 
-  app.post('/api/kugou/auth/manual', (req, res) => {
+  async function handleManualAuth(platform, req, res) {
     try {
+      if (typeof authManager.verifyAndStoreManual === 'function') {
+        const saved = await authManager.verifyAndStoreManual(platform, req.body || {});
+        res.json({ ok: true, ...saved });
+        return;
+      }
+
+      // Legacy fallback when a custom KuGouAuthManager instance is injected in unit tests
       let { userid = '', token = '', cookie = '', nickname = '' } = req.body || {};
       if (cookie && (!userid || !token)) {
         const parsed = parseCookieCredentials(cookie);
@@ -106,17 +124,38 @@ export function createAppServer({
         if (!token) token = parsed.token;
         if (!nickname && parsed.nickname) nickname = parsed.nickname;
       }
-
       const saved = authManager.storeAuthSession({ userid, token, nickname });
-      res.json({ ok: true, ...saved });
+      res.json({ ok: true, platform: 'kugou', ...saved });
     } catch (err) {
       res.status(400).json({
         ok: false,
-        error: err?.message || '无效的凭证格式，请确认包含 userid 与 token'
+        error: err?.message || '凭证格式无效，请检查后重试'
       });
     }
+  }
+
+  app.post('/api/auth/:platform/qr/create', (req, res) => {
+    handleQrCreate(req.params.platform, res);
   });
 
+  app.get('/api/auth/:platform/qr/check', (req, res) => {
+    handleQrCheck(req.params.platform, req, res);
+  });
+
+  app.post('/api/auth/:platform/manual', (req, res) => {
+    handleManualAuth(req.params.platform, req, res);
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const { authTicket } = req.body || {};
+    authManager.revokeAuthTicket(authTicket);
+    res.json({ ok: true });
+  });
+
+  // Backward-compatible KuGou routes
+  app.post('/api/kugou/qr/create', (_req, res) => handleQrCreate('kugou', res));
+  app.get('/api/kugou/qr/check', (req, res) => handleQrCheck('kugou', req, res));
+  app.post('/api/kugou/auth/manual', (req, res) => handleManualAuth('kugou', req, res));
   app.post('/api/kugou/auth/logout', (req, res) => {
     const { authTicket } = req.body || {};
     authManager.revokeAuthTicket(authTicket);
@@ -135,7 +174,11 @@ export function createAppServer({
 
     let streamUrl = target.streamUrl;
     if (!streamUrl && target.hash) {
-      streamUrl = await musicService.getStreamUrlForHash(target.hash, target.authSession);
+      streamUrl = await musicService.getStreamUrlForHash(
+        target.hash,
+        target.authSession,
+        target
+      );
     }
     if (!streamUrl) {
       res.status(502).json({ error: '未获取到播放地址' });
@@ -204,18 +247,18 @@ if (isDirectRun) {
     .then(async () => {
       const stats = musicService.getPoolStats();
       console.log(
-        `[KuGou 华语曲库] 基础池已加载：免费 ${stats.totalTracks} 首 + VIP原版 ${stats.vipTracks} 首（总去重 ${stats.totalWithVipUniqueSongs} 首）`
+        `[三平台华语曲库] 酷狗·网易云·QQ音乐 实时检索就绪（秒开缓存池 ${stats.totalWithVipUniqueSongs} 首）`
       );
       if (typeof musicService.expandPoolInBackground === 'function') {
         await musicService.expandPoolInBackground();
         const expanded = musicService.getPoolStats();
         console.log(
-          `[KuGou 华语曲库] 全量扩展完成：免费 ${expanded.totalTracks} 首 + VIP原版 ${expanded.vipTracks} 首（总去重 ${expanded.totalWithVipUniqueSongs} 首）`
+          `[三平台华语曲库] 秒开缓存池扩展完成（${expanded.totalWithVipUniqueSongs} 首 + 线上百万级动态全库）`
         );
       }
     })
     .catch((err) => {
-      console.warn('[KuGou 华语曲库] 预加载告警:', err?.message || err);
+      console.warn('[三平台华语曲库] 预加载告警:', err?.message || err);
     });
 
   server.listen(PORT, '0.0.0.0', () => {

@@ -3,7 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>华语猜歌 · 酷狗华语曲库</title>
+  <title>华语猜歌 · 酷狗 / 网易云 / QQ音乐实时曲库</title>
+  <script type="importmap">
+    {
+      "imports": {
+        "@microsoft/focusgroup-polyfill": "./vendor/focusgroup-polyfill/index.min.mjs"
+      }
+    }
+  </script>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -13,9 +20,9 @@
       <div class="brand-text">
         <h1>华语猜歌</h1>
         <p class="brand-sub">
-          <span>酷狗华语曲库</span>
+          <span>酷狗 · 网易云 · QQ音乐</span>
           <span aria-hidden="true">·</span>
-          <span id="pool-badge">曲库连接中</span>
+          <span id="pool-badge">实时联网全曲库</span>
         </p>
       </div>
       <div class="header-actions">
@@ -65,16 +72,29 @@
               <span id="nickname-error" class="field-error" aria-live="polite"></span>
             </div>
 
-            <div class="form-group">
-              <label for="room-name-input">房间名称（可选）</label>
-              <input
-                type="text"
-                id="room-name-input"
-                name="roomName"
-                maxlength="24"
-                placeholder="留空自动生成"
-                enterkeyhint="done"
-              >
+            <div class="manual-split-row">
+              <div class="form-group">
+                <label for="room-name-input">房间名称（可选）</label>
+                <input
+                  type="text"
+                  id="room-name-input"
+                  name="roomName"
+                  maxlength="24"
+                  placeholder="留空自动生成"
+                  enterkeyhint="next"
+                >
+              </div>
+              <div class="form-group">
+                <label for="custom-keyword-input">指定歌手/主题（可选）</label>
+                <input
+                  type="text"
+                  id="custom-keyword-input"
+                  name="customKeyword"
+                  maxlength="20"
+                  placeholder="如：周杰伦 / 粤语老歌"
+                  enterkeyhint="done"
+                >
+              </div>
             </div>
 
             <fieldset class="radio-fieldset">
@@ -195,7 +215,7 @@
           </div>
 
           <div id="lobby-vip-bar" class="lobby-vip-bar">
-            <span id="lobby-vip-text" class="lobby-vip-text">曲库：免费华语曲库</span>
+            <span id="lobby-vip-text" class="lobby-vip-text">曲库：三平台免费华语实时池</span>
             <div class="lobby-vip-actions">
               <button
                 type="button"
@@ -204,7 +224,7 @@
                 command="show-modal"
                 commandfor="vip-dialog"
               >
-                登录会员解锁全曲库
+                登录音乐会员
               </button>
               <button type="button" id="unbind-vip-btn" class="btn btn-ghost btn-sm" hidden>
                 解绑
@@ -242,7 +262,7 @@
         <div class="game-top-bar">
           <div class="round-counter">
             <span class="round-pill">第 <strong id="game-round-num">1</strong> / 10 轮</span>
-            <span id="game-source-tag" class="muted-text">酷狗华语</span>
+            <span id="game-source-tag" class="muted-text">华语曲库</span>
           </div>
           <strong id="round-timer-text" class="timer-value">45s</strong>
           <div class="game-top-actions">
@@ -401,12 +421,11 @@
       </div>
       <div class="dialog-body">
         <ul class="rules-list">
-          <li><strong>纯华语曲库</strong>：接入酷狗音乐华语榜单、经典歌单与歌手曲库，自动过滤外语及纯音乐伴奏。</li>
-          <li><strong>会员实时拉取</strong>：任意玩家扫码登录酷狗会员后，全房间共享解锁周杰伦、林俊杰、陈奕迅等 VIP 原版录音室歌曲。</li>
-          <li><strong>全员就绪开局</strong>：房间内所有人准备就绪后，自动倒计时开局。</li>
+          <li><strong>三平台实时全曲库</strong>：实时联网检索酷狗音乐、网易云音乐、QQ 音乐线上华语曲库，自动过滤外语与伴奏。</li>
+          <li><strong>多平台会员共享</strong>：支持扫码或 Cookie 登录酷狗、网易云、QQ 音乐会员，同房玩家可叠加解锁百万级 VIP 原版华语曲目。</li>
+          <li><strong>防剧透保护</strong>：答题阶段隐藏歌手名与歌单信息，仅在揭晓答案后展示完整曲目。</li>
           <li><strong>前 50% 随机起点</strong>：每轮随机抽取一首歌曲，从总时长前 50% 内随机节点开始播放。</li>
-          <li><strong>歌名一致即得分</strong>：在底部输入歌名，与标准歌名一致即结束本轮并加 1 分。</li>
-          <li><strong>十轮排名</strong>：每局 10 轮，结束后按总得分排名。</li>
+          <li><strong>歌名一致即得分</strong>：在底部输入歌名，与标准歌名一致即结束本轮并加 1 分，满 10 轮结算总排名。</li>
         </ul>
       </div>
       <form method="dialog" class="dialog-footer">
@@ -415,11 +434,11 @@
     </div>
   </dialog>
 
-  <!-- Native Modal Dialog: KuGou VIP Login -->
+  <!-- Native Modal Dialog: Multi-Platform VIP Login (KuGou / NetEase / QQ Music) -->
   <dialog id="vip-dialog" aria-labelledby="vip-dialog-title" closedby="any">
     <div class="dialog-inner">
       <div class="dialog-header">
-        <h2 id="vip-dialog-title">登录酷狗会员解锁曲库</h2>
+        <h2 id="vip-dialog-title">登录音乐会员解锁线上全曲库</h2>
         <button
           type="button"
           class="icon-close-btn"
@@ -432,79 +451,202 @@
       </div>
 
       <div class="dialog-body">
-        <div id="vip-active-box" class="vip-active-box" hidden>
-          <div>
-            <strong id="vip-active-name">已登录酷狗账号</strong>
-            <p class="muted-text">进入或创建房间时自动为全房间开启 VIP 实时拉取</p>
+        <!-- Tabbed Platform Switcher (modern-web-guidance: focusgroup + hidden=until-found) -->
+        <div class="vip-tabs">
+          <div class="vip-tablist" focusgroup="tablist nomemory" aria-label="选择音乐会员平台">
+            <button
+              type="button"
+              id="tab-kugou"
+              class="vip-tab-btn"
+              data-platform="kugou"
+              aria-selected="true"
+              focusgroupstart
+            >
+              <span id="tab-label-kugou">酷狗音乐</span>
+            </button>
+            <button
+              type="button"
+              id="tab-netease"
+              class="vip-tab-btn"
+              data-platform="netease"
+              aria-selected="false"
+            >
+              <span id="tab-label-netease">网易云音乐</span>
+            </button>
+            <button
+              type="button"
+              id="tab-qq"
+              class="vip-tab-btn"
+              data-platform="qq"
+              aria-selected="false"
+            >
+              <span id="tab-label-qq">QQ 音乐</span>
+            </button>
           </div>
-          <button type="button" id="logout-vip-btn" class="btn btn-outline btn-sm">
-            退出账号
-          </button>
-        </div>
 
-        <div class="qr-login-box">
-          <div class="qr-frame">
-            <img id="qr-code-img" class="qr-code-img" alt="酷狗音乐扫码登录二维码" hidden>
-            <span id="qr-placeholder" class="muted-text">正在获取二维码…</span>
+          <!-- Shared Active Account Strip + QR Frame -->
+          <div id="vip-active-box" class="vip-active-box" hidden>
+            <div>
+              <strong id="vip-active-name">已登录账号</strong>
+              <p class="muted-text">进入或创建房间时自动为全房间开启实时拉取</p>
+            </div>
+            <button type="button" id="logout-vip-btn" class="btn btn-outline btn-sm">
+              退出该平台
+            </button>
           </div>
-          <p id="qr-status-text" class="qr-status-text" role="status">请使用手机酷狗音乐 APP 扫一扫登录</p>
-          <button type="button" id="refresh-qr-btn" class="btn btn-outline btn-sm">
-            刷新二维码
-          </button>
-        </div>
 
-        <details class="manual-auth-details">
-          <summary>使用 Cookie 或 Token 手动绑定</summary>
-          <form id="manual-vip-form" class="manual-vip-form" novalidate>
-            <div class="form-group">
-              <label for="vip-cookie-input">粘贴酷狗网页 Cookie（自动提取 userid 与 token）</label>
-              <input
-                type="text"
-                id="vip-cookie-input"
-                name="cookie"
-                autocomplete="off"
-                autocorrect="off"
-                autocapitalize="none"
-                spellcheck="false"
-                placeholder="例如：userid=123456; token=abcdef..."
-              >
+          <div class="qr-login-box">
+            <div class="qr-frame">
+              <img id="qr-code-img" class="qr-code-img" alt="音乐平台扫码登录二维码" hidden>
+              <span id="qr-placeholder" class="muted-text">正在获取二维码…</span>
             </div>
-            <div class="manual-split-row">
-              <div class="form-group">
-                <label for="vip-userid-input">或填写 userid</label>
-                <input
-                  type="text"
-                  id="vip-userid-input"
-                  name="userid"
-                  inputmode="numeric"
-                  autocomplete="off"
-                  autocorrect="off"
-                  autocapitalize="none"
-                  spellcheck="false"
-                  placeholder="数字 ID"
-                >
-              </div>
-              <div class="form-group">
-                <label for="vip-token-input">token</label>
-                <input
-                  type="text"
-                  id="vip-token-input"
-                  name="token"
-                  autocomplete="off"
-                  autocorrect="off"
-                  autocapitalize="none"
-                  spellcheck="false"
-                  placeholder="登录令牌"
-                >
+            <p id="qr-status-text" class="qr-status-text" role="status">请使用对应音乐 APP 扫一扫登录</p>
+            <button type="button" id="refresh-qr-btn" class="btn btn-outline btn-sm">
+              刷新二维码
+            </button>
+          </div>
+
+          <div class="vip-panels">
+            <!-- Panel 1: KuGou Music -->
+            <div id="panel-kugou" role="tabpanel" aria-labelledby="tab-kugou" data-platform="kugou">
+              <div class="vip-panel-inner">
+                <details class="manual-auth-details">
+                  <summary>使用酷狗 Cookie 或 Token 手动绑定</summary>
+                  <form class="manual-vip-form" data-platform="kugou" novalidate>
+                    <div class="form-group">
+                      <label for="kg-cookie-input">粘贴酷狗网页 Cookie（含 userid 与 token）</label>
+                      <input
+                        type="text"
+                        id="kg-cookie-input"
+                        name="cookie"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        placeholder="例如：userid=123456; token=abcdef..."
+                      >
+                    </div>
+                    <div class="manual-split-row">
+                      <div class="form-group">
+                        <label for="kg-userid-input">或填 userid</label>
+                        <input
+                          type="text"
+                          id="kg-userid-input"
+                          name="userid"
+                          inputmode="numeric"
+                          autocomplete="off"
+                          placeholder="数字 ID"
+                        >
+                      </div>
+                      <div class="form-group">
+                        <label for="kg-token-input">token</label>
+                        <input
+                          type="text"
+                          id="kg-token-input"
+                          name="token"
+                          autocomplete="off"
+                          placeholder="酷狗登录令牌"
+                        >
+                      </div>
+                    </div>
+                    <span class="field-error" data-error-for="kugou" aria-live="polite"></span>
+                    <button type="submit" class="btn btn-primary btn-block">验证并绑定酷狗会员</button>
+                  </form>
+                </details>
               </div>
             </div>
-            <span id="vip-form-error" class="field-error" aria-live="polite"></span>
-            <button type="submit" class="btn btn-primary btn-block">验证并绑定</button>
-          </form>
-        </details>
+
+            <!-- Panel 2: NetEase Cloud Music -->
+            <div
+              id="panel-netease"
+              role="tabpanel"
+              aria-labelledby="tab-netease"
+              data-platform="netease"
+              hidden="until-found"
+            >
+              <div class="vip-panel-inner">
+                <details class="manual-auth-details">
+                  <summary>使用网易云音乐 Cookie (MUSIC_U) 手动绑定</summary>
+                  <form class="manual-vip-form" data-platform="netease" novalidate>
+                    <div class="form-group">
+                      <label for="ne-cookie-input">粘贴 music.163.com 的 Cookie 或 MUSIC_U 值</label>
+                      <input
+                        type="text"
+                        id="ne-cookie-input"
+                        name="cookie"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        placeholder="例如：MUSIC_U=00c3b7... 或直接粘贴 MUSIC_U 字符串"
+                      >
+                    </div>
+                    <span class="field-error" data-error-for="netease" aria-live="polite"></span>
+                    <button type="submit" class="btn btn-primary btn-block">验证并绑定网易云黑胶会员</button>
+                  </form>
+                </details>
+              </div>
+            </div>
+
+            <!-- Panel 3: QQ Music -->
+            <div
+              id="panel-qq"
+              role="tabpanel"
+              aria-labelledby="tab-qq"
+              data-platform="qq"
+              hidden="until-found"
+            >
+              <div class="vip-panel-inner">
+                <details class="manual-auth-details">
+                  <summary>使用 QQ 音乐 Cookie (qm_keyst) 手动绑定</summary>
+                  <form class="manual-vip-form" data-platform="qq" novalidate>
+                    <div class="form-group">
+                      <label for="qq-cookie-input">粘贴 y.qq.com 网页 Cookie（自动提取 uin 与 qm_keyst）</label>
+                      <input
+                        type="text"
+                        id="qq-cookie-input"
+                        name="cookie"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        placeholder="例如：uin=123456; qm_keyst=Q_H_L_..."
+                      >
+                    </div>
+                    <div class="manual-split-row">
+                      <div class="form-group">
+                        <label for="qq-userid-input">或填 QQ号 / musicid</label>
+                        <input
+                          type="text"
+                          id="qq-userid-input"
+                          name="userid"
+                          inputmode="numeric"
+                          autocomplete="off"
+                          placeholder="数字账号"
+                        >
+                      </div>
+                      <div class="form-group">
+                        <label for="qq-token-input">qm_keyst / musickey</label>
+                        <input
+                          type="text"
+                          id="qq-token-input"
+                          name="token"
+                          autocomplete="off"
+                          placeholder="Q_H_L_... 或 W_X_..."
+                        >
+                      </div>
+                    </div>
+                    <span class="field-error" data-error-for="qq" aria-live="polite"></span>
+                    <button type="submit" class="btn btn-primary btn-block">验证并绑定 QQ 音乐绿钻</button>
+                  </form>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <p class="vip-privacy-note">
-          凭证仅暂存于服务端内存用于当前房间实时获取酷狗音频流，房间关闭或解绑即刻销毁，不写入硬盘，亦不会下发给同房其他玩家。
+          支持同时登录多个音乐平台叠加曲库。凭证仅暂存于服务端内存用于当前房间实时拉取音频流，不写入硬盘，亦不会下发给同房其他玩家。
         </p>
       </div>
     </div>

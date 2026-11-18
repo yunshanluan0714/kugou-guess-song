@@ -7,6 +7,7 @@ import {
   pickRandomFirstHalfOffset
 } from './songUtils.js';
 import { kugouAuth } from './kugouAuth.js';
+import { pickRandomQueriesForCategory } from './mandarinCatalog.js';
 
 const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
@@ -418,12 +419,12 @@ class KuGouMandarinService {
     if (existing) {
       if (category === 'classic' && existing.category === 'chart') {
         existing.category = 'classic';
-        existing.sourceTag = sourceTag;
       }
       return;
     }
 
     targetMap.set(parsed.hash, {
+      platform: 'kugou',
       hash: parsed.hash,
       albumId: parsed.albumId,
       albumAudioId: parsed.albumAudioId,
@@ -434,7 +435,7 @@ class KuGouMandarinService {
       duration: parsed.duration,
       privilege: parsed.privilege,
       category,
-      sourceTag
+      sourceTag: '酷狗音乐'
     });
   }
 
@@ -781,10 +782,48 @@ class KuGouMandarinService {
     return resolved ? resolved.streamUrl : null;
   }
 
+  /**
+   * Real-time dynamic Mandarin song sampling from KuGou's live online search catalog
+   * (deep random pagination across 260+ Chinese artists & themes, or custom keyword).
+   */
+  async sampleLiveSongs({
+    category = 'all',
+    allowVip = false,
+    customKeyword = ''
+  } = {}) {
+    const freeMap = new Map();
+    const vipMap = new Map();
+    const queries = pickRandomQueriesForCategory(category, 2, customKeyword);
+
+    await Promise.all(
+      queries.map(async (q) => {
+        const url = `http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=${encodeURIComponent(
+          q.keyword
+        )}&page=${q.page}&pagesize=30`;
+        const data = await fetchJsonSafe(url, {}, 4500);
+        const list = data?.data?.info || [];
+        for (const item of list) {
+          this._collectCandidate(freeMap, vipMap, item, q.category, '酷狗音乐');
+        }
+      })
+    );
+
+    const out = [...freeMap.values()];
+    if (allowVip) {
+      out.push(...vipMap.values());
+    }
+    return out;
+  }
+
   async proxyAudioStream(req, res, streamUrl) {
     const upstreamHeaders = {
       'User-Agent': MOBILE_UA
     };
+    if (/music\.126\.net/i.test(streamUrl)) {
+      upstreamHeaders.Referer = 'https://music.163.com/';
+    } else if (/qq\.com/i.test(streamUrl)) {
+      upstreamHeaders.Referer = 'https://y.qq.com/';
+    }
     if (req.headers.range) {
       upstreamHeaders.Range = req.headers.range;
     }

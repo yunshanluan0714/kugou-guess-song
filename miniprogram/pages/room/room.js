@@ -21,8 +21,9 @@ Page({
     durationLabel: '00:00',
     guessText: '',
     showVipPanel: false,
+    vipPlatform: 'kugou',
     qrImgBase64: '',
-    qrStatusText: '请使用酷狗音乐 APP 扫码登录',
+    qrStatusText: '请使用对应音乐 APP 扫码登录',
     vipCookie: ''
   },
 
@@ -225,11 +226,23 @@ Page({
     }
   },
 
+  onSelectVipPlatform(e) {
+    const plat = e.currentTarget.dataset.platform || 'kugou';
+    this.setData({ vipPlatform: plat });
+    this.onRefreshQr();
+  },
+
   onRefreshQr() {
     clearInterval(this.qrTimer);
+    const plat = this.data.vipPlatform || 'kugou';
+    const appHints = {
+      kugou: '请使用手机「酷狗音乐 APP」扫码',
+      netease: '请使用手机「网易云音乐 APP」扫码',
+      qq: '请使用「手机 QQ」扫码授权登录 QQ音乐'
+    };
     this.setData({ qrStatusText: '正在获取二维码…', qrImgBase64: '' });
     wx.request({
-      url: `${config.HTTP_BASE}/api/kugou/qr/create`,
+      url: `${config.HTTP_BASE}/api/auth/${plat}/qr/create`,
       method: 'POST',
       success: (res) => {
         if (!res.data?.ok) {
@@ -239,11 +252,11 @@ Page({
         const qrKey = res.data.qrKey;
         this.setData({
           qrImgBase64: res.data.qrImgBase64,
-          qrStatusText: '请使用手机酷狗音乐 APP 扫码'
+          qrStatusText: appHints[plat] || '请扫码登录'
         });
         this.qrTimer = setInterval(() => {
           wx.request({
-            url: `${config.HTTP_BASE}/api/kugou/qr/check?key=${encodeURIComponent(qrKey)}`,
+            url: `${config.HTTP_BASE}/api/auth/${plat}/qr/check?key=${encodeURIComponent(qrKey)}`,
             success: (chkRes) => {
               const chk = chkRes.data;
               if (!chk?.ok) return;
@@ -272,8 +285,9 @@ Page({
   onSubmitVipCookie() {
     const cookie = (this.data.vipCookie || '').trim();
     if (!cookie) return;
+    const plat = this.data.vipPlatform || 'kugou';
     wx.request({
-      url: `${config.HTTP_BASE}/api/kugou/auth/manual`,
+      url: `${config.HTTP_BASE}/api/auth/${plat}/manual`,
       method: 'POST',
       data: { cookie },
       success: (res) => {
