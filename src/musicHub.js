@@ -268,29 +268,37 @@ export class MultiPlatformMusicHub {
   }
 
   async _sampleFromPlatform(platform, { category, allowVip, customKeyword, authSession }) {
+    let timer = null;
     try {
-      if (platform === 'netease') {
-        return await this.netease.sampleLiveSongs({
-          category,
-          allowVip,
-          customKeyword,
-          authSession
-        });
-      }
-      if (platform === 'qq') {
-        return await this.qq.sampleLiveSongs({
-          category,
-          allowVip,
-          customKeyword
-        });
-      }
-      return await this.kugou.sampleLiveSongs({
-        category,
-        allowVip,
-        customKeyword
+      const work =
+        platform === 'netease'
+          ? this.netease.sampleLiveSongs({
+              category,
+              allowVip,
+              customKeyword,
+              authSession
+            })
+          : platform === 'qq'
+            ? this.qq.sampleLiveSongs({
+                category,
+                allowVip,
+                customKeyword
+              })
+            : this.kugou.sampleLiveSongs({
+                category,
+                allowVip,
+                customKeyword
+              });
+
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve([]), 2400);
+        timer.unref?.();
       });
+      return await Promise.race([work, timeout]);
     } catch {
       return [];
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -323,6 +331,10 @@ export class MultiPlatformMusicHub {
     }
 
     if (resolved) {
+      if (this.streamCache.size > 600) {
+        const oldestKey = this.streamCache.keys().next().value;
+        if (oldestKey) this.streamCache.delete(oldestKey);
+      }
       this.streamCache.set(cacheKey, resolved);
     }
     return resolved;
@@ -425,13 +437,22 @@ export class MultiPlatformMusicHub {
 
     const combinedCandidates = [...liveCandidates, ...fallbackCandidates];
 
-    for (const candidate of combinedCandidates) {
-      const info = await this._resolveCandidateStream(candidate, sessions);
-      if (!info || !info.streamUrl) continue;
+    for (let idx = 0; idx < combinedCandidates.length; idx += 3) {
+      const batch = combinedCandidates.slice(idx, idx + 3);
+      const batchResults = await Promise.all(
+        batch.map(async (candidate) => {
+          const info = await this._resolveCandidateStream(candidate, sessions);
+          if (!info || !info.streamUrl) return null;
+          const duration = info.duration || candidate.duration;
+          if (!Number.isFinite(duration) || duration < 60) return null;
+          return { candidate, info, duration };
+        })
+      );
 
-      const duration = info.duration || candidate.duration;
-      if (!Number.isFinite(duration) || duration < 60) continue;
+      const hit = batchResults.find(Boolean);
+      if (!hit) continue;
 
+      const { candidate, info, duration } = hit;
       const startOffset = pickRandomFirstHalfOffset(duration);
       const startPercent = Number(((startOffset / duration) * 100).toFixed(1));
       const platform = normalizePlatform(candidate.platform || 'kugou');

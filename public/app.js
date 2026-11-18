@@ -171,6 +171,7 @@ const state = {
   qrPollTimer: null,
   qrReqSeq: 0,
   currentAudioKey: null,
+  prebufferedKey: null,
   audioMuted: false,
   audioUnlocked: false,
   timerRaf: null,
@@ -333,6 +334,7 @@ function unlockAudioElement() {
 
 function stopRoundAudio() {
   state.currentAudioKey = null;
+  state.prebufferedKey = null;
   els.audioEl.onloadedmetadata = null;
   els.audioEl.oncanplay = null;
   els.audioEl.pause();
@@ -344,11 +346,42 @@ function stopRoundAudio() {
   els.manualPlayBtn.hidden = true;
 }
 
+function prebufferUpcomingAudio(upcoming) {
+  if (!upcoming || !upcoming.audioUrl || !state.room?.code) return;
+  const audioKey = `${state.room.code}:${upcoming.roundNumber}`;
+  if (state.currentAudioKey === audioKey || state.prebufferedKey === audioKey) return;
+
+  state.currentAudioKey = null;
+  state.prebufferedKey = audioKey;
+
+  const targetOffset = Number(upcoming.startOffset || 0);
+  els.audioEl.pause();
+  els.audioEl.oncanplay = null;
+  els.audioEl.onloadedmetadata = () => {
+    if (state.prebufferedKey !== audioKey) return;
+    try {
+      const safeTarget = Math.min(
+        targetOffset,
+        Math.max(0, (els.audioEl.duration || upcoming.duration || 60) * 0.5 - 0.1)
+      );
+      els.audioEl.currentTime = safeTarget;
+    } catch {
+      // Browser will apply seek when ready
+    }
+  };
+  els.audioEl.preload = 'auto';
+  els.audioEl.src = `${apiUrl(upcoming.audioUrl)}#t=${targetOffset}`;
+  els.audioEl.load();
+}
+
 function startRoundAudio(round) {
   if (!round || !round.audioUrl) return;
   const audioKey = `${state.room?.code}:${round.roundNumber}`;
   if (state.currentAudioKey === audioKey) return;
+
+  const wasPrebuffered = state.prebufferedKey === audioKey;
   state.currentAudioKey = audioKey;
+  state.prebufferedKey = null;
 
   const targetOffset = Number(round.startOffset || 0);
   let seekApplied = false;
@@ -384,13 +417,26 @@ function startRoundAudio(round) {
     }
   };
 
+  if (wasPrebuffered && els.audioEl.readyState >= 1) {
+    els.audioEl.onloadedmetadata = null;
+    els.audioEl.oncanplay = () => {
+      if (els.audioEl.paused && state.currentAudioKey === audioKey) {
+        seekAndPlay();
+      }
+    };
+    seekAndPlay();
+    return;
+  }
+
   els.audioEl.onloadedmetadata = seekAndPlay;
   els.audioEl.oncanplay = () => {
     if (els.audioEl.paused && state.currentAudioKey === audioKey) {
       seekAndPlay();
     }
   };
-  els.audioEl.src = apiUrl(round.audioUrl);
+  if (!wasPrebuffered) {
+    els.audioEl.src = `${apiUrl(round.audioUrl)}#t=${targetOffset}`;
+  }
 }
 
 els.audioEl.addEventListener('timeupdate', () => {
@@ -561,7 +607,11 @@ function renderCurrentRoom() {
   }
 
   if (room.status === 'waiting' || room.status === 'countdown') {
-    stopRoundAudio();
+    if (room.status === 'countdown' && room.upcomingAudio) {
+      prebufferUpcomingAudio(room.upcomingAudio);
+    } else {
+      stopRoundAudio();
+    }
     showView('lobby');
     renderLobby(room);
   } else if (room.status === 'finished') {
@@ -711,7 +761,11 @@ function renderGame(room) {
     startRoundAudio(round);
   } else if (room.status === 'round_reveal' && round?.revealedSong) {
     els.audioEl.pause();
+    state.currentAudioKey = null;
     els.playingDot.classList.remove('is-active');
+    if (room.upcomingAudio) {
+      prebufferUpcomingAudio(room.upcomingAudio);
+    }
 
     const rev = round.revealedSong;
     els.playingStatusTitle.textContent = rev.winnerNickname

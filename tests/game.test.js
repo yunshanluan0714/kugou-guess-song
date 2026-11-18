@@ -751,3 +751,101 @@ test(
     assert.ok(qqSongs.length > 0, 'Expected live Mandarin songs from QQ Music');
   }
 );
+
+// ==================== 7. BACKGROUND PREFETCH & ZERO-WAIT ROUND TRANSITION TEST ====================
+test('Background prefetch & upcomingAudio eliminate round loading wait without spoilers', async () => {
+  let seq = 0;
+  const slowMockService = {
+    async ensurePoolLoaded() {
+      return [];
+    },
+    getPoolStats() {
+      return { totalTracks: 50, uniqueSongs: 50, classicCount: 50, chartCount: 0 };
+    },
+    async pickPlayableRoundSong() {
+      // Simulate 250ms upstream API search + stream resolution latency
+      await new Promise((r) => setTimeout(r, 250));
+      seq += 1;
+      return {
+        platform: 'qq',
+        hash: `qq_slow_${seq}`,
+        canonicalTitle: `预加载金曲${seq}`,
+        normalizedCanonical: `预加载金曲${seq}`,
+        rawSongName: `预加载金曲${seq}`,
+        singerName: `神秘歌手${seq}`,
+        duration: 240,
+        startOffset: 48.0,
+        startPercent: 20.0,
+        albumImg: '',
+        sourceTag: 'QQ音乐',
+        category: 'classic',
+        streamUrl: 'https://example.com/prefetched.mp3'
+      };
+    },
+    async proxyAudioStream(_req, res) {
+      res.status(200).send('PREBUFFERED_AUDIO_BYTES');
+    }
+  };
+
+  const { server } = createAppServer({
+    musicService: slowMockService,
+    roomOptions: { totalRounds: 3, countdownMs: 450, revealMs: 400 }
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const httpBase = `http://127.0.0.1:${port}`;
+  const ws = await connectClient(`ws://127.0.0.1:${port}/ws`);
+
+  try {
+    ws.send(JSON.stringify({ type: 'create_room', clientId: 'solo1', nickname: '闪电侠' }));
+    await ws.waitFor((m) => m.type === 'joined_room');
+
+    ws.send(JSON.stringify({ type: 'toggle_ready', ready: true }));
+    await ws.waitFor((m) => m.type === 'room_state' && m.room.players[0].ready === true);
+
+    const countdownStartAt = Date.now();
+    ws.send(JSON.stringify({ type: 'solo_start' }));
+
+    // During countdown, server stages Round 1 upcomingAudio (zero spoilers!)
+    const prebufState = await ws.waitFor(
+      (m) => m.room?.status === 'countdown' && Boolean(m.room?.upcomingAudio?.audioUrl)
+    );
+    const upcoming1 = prebufState.room.upcomingAudio;
+    assert.equal(upcoming1.roundNumber, 1);
+    assert.equal(JSON.stringify(prebufState).includes('预加载金曲'), false);
+    assert.equal(JSON.stringify(prebufState).includes('神秘歌手'), false);
+
+    // Client can prebuffer the exact upcomingAudio URL during countdown!
+    const preRes = await fetch(`${httpBase}${upcoming1.audioUrl}`);
+    assert.equal(preRes.status, 200);
+    assert.equal(await preRes.text(), 'PREBUFFERED_AUDIO_BYTES');
+
+    // Round 1 starts right as the 450ms countdown finishes (no extra 250ms wait!)
+    const r1 = await ws.waitFor((m) => m.type === 'round_start' && m.room.currentRound === 1);
+    const elapsedR1 = Date.now() - countdownStartAt;
+    assert.ok(elapsedR1 < 620, `Expected instant Round 1 start after 450ms countdown, took ${elapsedR1}ms`);
+    assert.equal(r1.room.activeRound.audioUrl, upcoming1.audioUrl);
+
+    // Wait 300ms during Round 1 so Round 2 finishes prefetching in background, then guess Round 1
+    await new Promise((r) => setTimeout(r, 300));
+    ws.send(JSON.stringify({ type: 'submit_guess', text: '预加载金曲1' }));
+
+    const reveal1 = await ws.waitFor((m) => m.type === 'round_reveal');
+    const revealAt = Date.now();
+    // Reveal payload ALREADY carries Round 2 upcomingAudio for client pre-buffering!
+    assert.equal(reveal1.room.upcomingAudio?.roundNumber, 2);
+
+    const r2 = await ws.waitFor((m) => m.type === 'round_start' && m.room.currentRound === 2);
+    const revealToR2Ms = Date.now() - revealAt;
+    assert.ok(
+      revealToR2Ms < 550,
+      `Expected instant Round 2 transition after 400ms reveal, took ${revealToR2Ms}ms`
+    );
+    assert.equal(r2.room.activeRound.audioUrl, reveal1.room.upcomingAudio.audioUrl);
+  } finally {
+    ws.close();
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

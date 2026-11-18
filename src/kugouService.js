@@ -860,7 +860,7 @@ class KuGouMandarinService {
       res.setHeader('Accept-Ranges', acceptRanges);
       if (contentRange) res.setHeader('Content-Range', contentRange);
       if (contentLength) res.setHeader('Content-Length', contentLength);
-      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Cache-Control', 'private, max-age=180');
 
       if (!upstream.body) {
         res.end();

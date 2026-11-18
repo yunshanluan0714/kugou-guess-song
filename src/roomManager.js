@@ -126,6 +126,11 @@ export class RoomManager {
       clearTimeout(room.cleanupTimer);
       room.cleanupTimer = null;
     }
+    if (room.prefetchDelayTimer) {
+      clearTimeout(room.prefetchDelayTimer);
+      room.prefetchDelayTimer = null;
+    }
+    room.prefetchEpoch = (room.prefetchEpoch || 0) + 1;
     this._clearBotTimers(room);
   }
 
@@ -264,6 +269,20 @@ export class RoomManager {
       activeList
     };
 
+    let upcomingAudio = null;
+    if (
+      room.stagedNextRound &&
+      (room.status === 'countdown' ||
+        (room.status === 'round_reveal' && room.currentRound < room.totalRounds))
+    ) {
+      upcomingAudio = {
+        roundNumber: room.stagedNextRound.roundNumber,
+        audioUrl: `/api/rooms/${room.code}/audio?round=${room.stagedNextRound.roundNumber}&token=${room.stagedNextRound.audioToken}`,
+        duration: room.stagedNextRound.song.duration,
+        startOffset: room.stagedNextRound.song.startOffset
+      };
+    }
+
     return {
       code: room.code,
       name: room.name,
@@ -294,6 +313,7 @@ export class RoomManager {
       })),
       rankings,
       activeRound: roundPublic,
+      upcomingAudio,
       history: room.history,
       feed: room.feed.slice(-30)
     };
@@ -309,9 +329,12 @@ export class RoomManager {
 
   getAudioTarget(roomCode, roundNum, token) {
     const room = this.rooms.get(String(roomCode));
-    if (!room || !room.activeRound) return null;
+    if (!room) return null;
+
+    const targetNum = Number(roundNum);
     if (
-      Number(roundNum) === room.activeRound.roundNumber &&
+      room.activeRound &&
+      targetNum === room.activeRound.roundNumber &&
       token &&
       token === room.activeRound.audioToken
     ) {
@@ -326,6 +349,29 @@ export class RoomManager {
         albumAudioId: room.activeRound.albumAudioId || 0,
         duration: room.activeRound.duration || 180,
         streamUrl: room.activeRound.streamUrl,
+        authSession: room.vipSessions?.[plat] || room.vipSession || null,
+        authSessions: room.vipSessions || null
+      };
+    }
+
+    if (
+      room.stagedNextRound &&
+      targetNum === room.stagedNextRound.roundNumber &&
+      token &&
+      token === room.stagedNextRound.audioToken
+    ) {
+      const stagedSong = room.stagedNextRound.song;
+      const plat = stagedSong.platform || 'kugou';
+      return {
+        platform: plat,
+        hash: stagedSong.hash,
+        songId: stagedSong.songId || '',
+        mid: stagedSong.mid || '',
+        mediaMid: stagedSong.mediaMid || '',
+        albumId: stagedSong.albumId || '',
+        albumAudioId: stagedSong.albumAudioId || 0,
+        duration: stagedSong.duration || 180,
+        streamUrl: stagedSong.streamUrl,
         authSession: room.vipSessions?.[plat] || room.vipSession || null,
         authSessions: room.vipSessions || null
       };
@@ -543,6 +589,11 @@ export class RoomManager {
       vipSession: null,
       vipSessions: { kugou: null, netease: null, qq: null },
       activeRound: null,
+      prefetchedQueue: [],
+      stagedNextRound: null,
+      prefetchEpoch: 1,
+      prefetchWorkerPromise: null,
+      prefetchDelayTimer: null,
       history: [],
       feed: [],
       usedHashes: new Set(),
@@ -569,10 +620,120 @@ export class RoomManager {
 
     this.rooms.set(code, room);
     this.socketBindings.set(ws, { roomCode: code, clientId });
+    this._scheduleLobbyPrefetch(room, 150);
     this._send(ws, {
       type: 'joined_room',
       clientId,
       room: this.serializeRoom(room)
+    });
+  }
+
+  _invalidatePrefetch(room) {
+    room.prefetchEpoch = (room.prefetchEpoch || 0) + 1;
+    room.prefetchedQueue = [];
+    room.stagedNextRound = null;
+    if (room.prefetchDelayTimer) {
+      clearTimeout(room.prefetchDelayTimer);
+      room.prefetchDelayTimer = null;
+    }
+  }
+
+  _scheduleLobbyPrefetch(room, delayMs = 150) {
+    if (room.prefetchDelayTimer) {
+      clearTimeout(room.prefetchDelayTimer);
+    }
+    room.prefetchDelayTimer = setTimeout(() => {
+      room.prefetchDelayTimer = null;
+      this._refillPrefetchQueue(room, 2);
+    }, delayMs);
+    room.prefetchDelayTimer.unref?.();
+  }
+
+  _stageUpcomingRound(room) {
+    const nextRoundNum = room.status === 'countdown' ? 1 : room.currentRound + 1;
+    if (nextRoundNum > room.totalRounds) return null;
+    if (room.stagedNextRound && room.stagedNextRound.roundNumber === nextRoundNum) {
+      return room.stagedNextRound;
+    }
+
+    while (room.prefetchedQueue.length > 0) {
+      const candidate = room.prefetchedQueue.shift();
+      if (
+        candidate &&
+        !room.usedHashes.has(candidate.hash) &&
+        !room.usedCanonicalTitles.has(candidate.normalizedCanonical)
+      ) {
+        room.stagedNextRound = {
+          roundNumber: nextRoundNum,
+          audioToken: crypto.randomBytes(12).toString('hex'),
+          song: candidate
+        };
+        return room.stagedNextRound;
+      }
+    }
+    return null;
+  }
+
+  _refillPrefetchQueue(room, desiredCount = 2) {
+    if (!this.rooms.has(room.code) || room.status === 'finished') return;
+    if (room.prefetchWorkerPromise) return;
+
+    room.prefetchWorkerPromise = (async () => {
+      while (this.rooms.has(room.code) && room.status !== 'finished') {
+        const remaining = room.totalRounds - room.currentRound;
+        const target = Math.min(desiredCount, Math.max(0, remaining));
+        const have = room.prefetchedQueue.length + (room.stagedNextRound ? 1 : 0);
+        if (have >= target) break;
+
+        const epoch = room.prefetchEpoch;
+        const excludeHashes = new Set(room.usedHashes);
+        const excludeTitles = new Set(room.usedCanonicalTitles);
+        if (room.activeRound?.hash) excludeHashes.add(room.activeRound.hash);
+        if (room.stagedNextRound?.song) {
+          excludeHashes.add(room.stagedNextRound.song.hash);
+          excludeTitles.add(room.stagedNextRound.song.normalizedCanonical);
+        }
+        for (const s of room.prefetchedQueue) {
+          excludeHashes.add(s.hash);
+          excludeTitles.add(s.normalizedCanonical);
+        }
+
+        try {
+          const song = await this.musicService.pickPlayableRoundSong({
+            usedHashes: excludeHashes,
+            usedCanonicalTitles: excludeTitles,
+            category: room.category,
+            customKeyword: room.customKeyword || '',
+            authSession: room.vipSession,
+            authSessions: room.vipSessions
+          });
+
+          if (!this.rooms.has(room.code) || room.prefetchEpoch !== epoch) {
+            continue;
+          }
+          if (
+            !room.usedHashes.has(song.hash) &&
+            !room.prefetchedQueue.some((x) => x.hash === song.hash)
+          ) {
+            room.prefetchedQueue.push(song);
+            if (
+              !room.stagedNextRound &&
+              (room.status === 'countdown' ||
+                (room.status === 'round_reveal' && room.currentRound < room.totalRounds))
+            ) {
+              if (this._stageUpcomingRound(room)) {
+                this._broadcastState(room);
+              }
+            }
+          } else {
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+    })().finally(() => {
+      room.prefetchWorkerPromise = null;
     });
   }
 
@@ -824,6 +985,8 @@ export class RoomManager {
     const summary = boundEntries
       .map((e) => `${e.platformLabel}（${e.nickname}）`)
       .join('、');
+    this._invalidatePrefetch(room);
+    this._scheduleLobbyPrefetch(room, 80);
     this._pushFeed(room, {
       type: 'system',
       text: `${player.nickname} 已登录 ${summary}，本房间已开启会员实时拉取`
@@ -867,6 +1030,8 @@ export class RoomManager {
     }
 
     this._syncPrimaryVipSession(room);
+    this._invalidatePrefetch(room);
+    this._scheduleLobbyPrefetch(room, 80);
     this._pushFeed(room, {
       type: 'system',
       text: `${player.nickname} 已解除 ${removedLabels.join('、')} 会员绑定`
@@ -898,8 +1063,16 @@ export class RoomManager {
 
   _beginCountdown(room, allowSolo = false) {
     if (room.countdownTimer) clearTimeout(room.countdownTimer);
+    if (room.prefetchDelayTimer) {
+      clearTimeout(room.prefetchDelayTimer);
+      room.prefetchDelayTimer = null;
+    }
     room.status = 'countdown';
     room.countdownEndsAt = Date.now() + this.countdownMs;
+
+    // Stage Round 1 immediately if already prefetched, and ensure 2 rounds are prefetched
+    this._stageUpcomingRound(room);
+    this._refillPrefetchQueue(room, 2);
 
     this._pushFeed(room, {
       type: 'system',
@@ -937,22 +1110,53 @@ export class RoomManager {
     this._clearBotTimers(room);
 
     room.currentRound += 1;
-    room.status = 'loading_round';
     room.countdownEndsAt = null;
     for (const p of room.players) {
       p.skipVoted = false;
     }
-    this._broadcastState(room);
 
     try {
-      const song = await this.musicService.pickPlayableRoundSong({
-        usedHashes: room.usedHashes,
-        usedCanonicalTitles: room.usedCanonicalTitles,
-        category: room.category,
-        customKeyword: room.customKeyword || '',
-        authSession: room.vipSession,
-        authSessions: room.vipSessions
-      });
+      let song = null;
+      let audioToken = null;
+
+      if (
+        room.stagedNextRound &&
+        room.stagedNextRound.roundNumber === room.currentRound &&
+        !room.usedHashes.has(room.stagedNextRound.song.hash)
+      ) {
+        song = room.stagedNextRound.song;
+        audioToken = room.stagedNextRound.audioToken;
+        room.stagedNextRound = null;
+      } else {
+        room.stagedNextRound = null;
+        while (room.prefetchedQueue.length > 0) {
+          const candidate = room.prefetchedQueue.shift();
+          if (
+            candidate &&
+            !room.usedHashes.has(candidate.hash) &&
+            !room.usedCanonicalTitles.has(candidate.normalizedCanonical)
+          ) {
+            song = candidate;
+            audioToken = crypto.randomBytes(12).toString('hex');
+            break;
+          }
+        }
+      }
+
+      if (!song) {
+        room.status = 'loading_round';
+        this._broadcastState(room);
+
+        song = await this.musicService.pickPlayableRoundSong({
+          usedHashes: room.usedHashes,
+          usedCanonicalTitles: room.usedCanonicalTitles,
+          category: room.category,
+          customKeyword: room.customKeyword || '',
+          authSession: room.vipSession,
+          authSessions: room.vipSessions
+        });
+        audioToken = crypto.randomBytes(12).toString('hex');
+      }
 
       if (!this.rooms.has(room.code)) return;
 
@@ -961,7 +1165,6 @@ export class RoomManager {
 
       const startedAt = Date.now();
       const endsAt = startedAt + room.roundDurationSec * 1000;
-      const audioToken = crypto.randomBytes(12).toString('hex');
 
       room.activeRound = {
         roundNumber: room.currentRound,
@@ -997,6 +1200,9 @@ export class RoomManager {
       });
 
       this._broadcastState(room, 'round_start');
+
+      // Immediately prefetch upcoming rounds in background while players listen & guess
+      this._refillPrefetchQueue(room, 2);
 
       room.roundTimer = setTimeout(() => {
         this._endRoundTimeoutOrSkip(room, 'timeout');
@@ -1145,6 +1351,11 @@ export class RoomManager {
       text: `🎯 ${player.nickname} 猜中《${room.activeRound.canonicalTitle}》！本轮结束，+1 分！`
     });
 
+    if (room.currentRound < room.totalRounds) {
+      this._stageUpcomingRound(room);
+      this._refillPrefetchQueue(room, 2);
+    }
+
     this._broadcastState(room, 'round_reveal');
     this._schedulePostReveal(room);
     return { correct: true };
@@ -1210,6 +1421,11 @@ export class RoomManager {
           : `⏱️ 本轮时间到，无人猜中！答案：《${room.activeRound.canonicalTitle}》- ${room.activeRound.singerName}`
     });
 
+    if (room.currentRound < room.totalRounds) {
+      this._stageUpcomingRound(room);
+      this._refillPrefetchQueue(room, 2);
+    }
+
     this._broadcastState(room, 'round_reveal');
     this._schedulePostReveal(room);
   }
@@ -1232,6 +1448,8 @@ export class RoomManager {
     this._clearTimers(room);
     room.status = 'finished';
     room.activeRound = null;
+    room.prefetchedQueue = [];
+    room.stagedNextRound = null;
     for (const p of room.players) {
       if (!p.isBot) p.ready = false;
       p.skipVoted = false;
@@ -1264,6 +1482,8 @@ export class RoomManager {
     room.history = [];
     room.usedHashes.clear();
     room.usedCanonicalTitles.clear();
+    this._invalidatePrefetch(room);
+    this._scheduleLobbyPrefetch(room, 150);
 
     for (const p of room.players) {
       p.score = 0;
